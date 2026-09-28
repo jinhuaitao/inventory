@@ -1,0 +1,14 @@
+{{define "content"}}
+<div class="error-page">
+  <div class="error-code danger">500</div>
+  <h2 class="error-title">服务器开小差了</h2>
+  <p class="error-desc">
+    系统在处理请求时遇到了问题，错误详情已记录到服务端日志。<br>
+    请稍后重试，如果问题持续存在，请联系管理员。
+  </p>
+  <div class="error-actions">
+    <a href="/" class="btn btn-primary">返回首页</a>
+    <a href="javascript:history.back()" class="btn btn-outline">返回上一页</a>
+  </div>
+</div>
+{{end}}

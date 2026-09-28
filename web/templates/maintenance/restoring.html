@@ -1,0 +1,54 @@
+{{define "content"}}
+<div class="page page-narrow">
+
+  <div class="update-restarting">
+    <div class="restart-spinner" aria-hidden="true">
+      <svg viewBox="0 0 50 50" width="56" height="56">
+        <circle cx="25" cy="25" r="20" fill="none" stroke="currentColor" stroke-opacity="0.15" stroke-width="4"/>
+        <circle cx="25" cy="25" r="20" fill="none" stroke="currentColor" stroke-width="4"
+                stroke-linecap="round" stroke-dasharray="90 200">
+          <animateTransform attributeName="transform" type="rotate"
+                            from="0 25 25" to="360 25 25" dur="1s" repeatCount="indefinite"/>
+        </circle>
+      </svg>
+    </div>
+
+    <h2 class="update-restarting-title">备份已就绪，服务正在重启</h2>
+    <p class="update-restarting-desc">
+      已校验并暂存 <code>{{.Data.Source}}</code>（{{fileSize .Data.Size}}）。
+      服务重启时会把它换入，这个过程通常只需要几秒钟。
+    </p>
+
+    <div class="alert alert-info">
+      <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="8" r="0.9" fill="currentColor" stroke="none"/></svg>
+      <span>
+        恢复后的数据量：商品 {{index .Data.Counts "products"}} 条、分类
+        {{index .Data.Counts "categories"}} 个、供应商 {{index .Data.Counts "suppliers"}} 个、
+        用户 {{index .Data.Counts "users"}} 个。
+      </span>
+    </div>
+
+    <p class="update-restarting-hint">页面将在 <span id="restartCountdown">5</span> 秒后自动刷新……</p>
+
+    <a href="{{.Data.Refresh}}" class="btn btn-primary">立即刷新</a>
+  </div>
+
+</div>
+{{end}}
+
+{{define "scripts"}}
+<script>
+  (function () {
+    var seconds = 5;
+    var el = document.getElementById('restartCountdown');
+    var timer = setInterval(function () {
+      seconds -= 1;
+      if (el) { el.textContent = String(Math.max(seconds, 0)); }
+      if (seconds <= 0) {
+        clearInterval(timer);
+        window.location.replace({{.Data.Refresh}});
+      }
+    }, 1000);
+  })();
+</script>
+{{end}}

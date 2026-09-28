@@ -1,0 +1,71 @@
+{{define "content"}}
+{{$s := .Data.Supplier}}
+<div class="page">
+
+  <div class="page-head">
+    <div>
+      <div class="breadcrumb">
+        <a href="/suppliers">供应商管理</a><span>/</span><span>{{$s.Name}}</span>
+      </div>
+      <h2 class="page-title">{{$s.Name}}</h2>
+      <p class="page-desc">合作商品 {{num $s.ProductCount}} 项</p>
+    </div>
+    <div class="page-actions">
+      {{if .User.Role.CanWrite}}
+      <a href="/suppliers/{{$s.ID}}/edit" class="btn btn-primary">编辑</a>
+      {{end}}
+      <a href="/suppliers" class="btn btn-ghost">返回</a>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <section class="card">
+      <div class="card-head"><h2 class="card-title">联系方式</h2></div>
+      <div class="card-body">
+        <dl class="detail-list">
+          <div class="detail-row"><dt>联系人</dt><dd>{{default $s.ContactPerson "—"}}</dd></div>
+          <div class="detail-row"><dt>联系电话</dt><dd>{{default $s.Phone "—"}}</dd></div>
+          <div class="detail-row"><dt>邮箱</dt><dd>{{default $s.Email "—"}}</dd></div>
+          <div class="detail-row"><dt>地址</dt><dd>{{default $s.Address "—"}}</dd></div>
+          <div class="detail-row"><dt>备注</dt><dd>{{default $s.Note "—"}}</dd></div>
+          <div class="detail-row"><dt>创建时间</dt><dd>{{formatDateTime $s.CreatedAt}}</dd></div>
+        </dl>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head">
+        <h2 class="card-title">供货商品</h2>
+        <a href="/products?supplier={{$s.ID}}" class="card-link">查看全部</a>
+      </div>
+      <div class="card-body no-pad">
+        {{if .Data.Products}}
+        <table class="table table-compact">
+          <thead>
+            <tr><th>商品</th><th class="num">库存</th><th class="num">进价</th></tr>
+          </thead>
+          <tbody>
+            {{range .Data.Products}}
+            <tr>
+              <td>
+                <a href="/products/{{.ID}}" class="cell-link">{{truncate .Name 18}}</a>
+                <div class="cell-sub">{{.SKU}}</div>
+              </td>
+              <td class="num">
+                {{if .IsLowStock}}<span class="text-warning strong">{{num .Quantity}}</span>
+                {{else}}{{num .Quantity}}{{end}}
+              </td>
+              <td class="num">{{money .CostPrice}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+        {{else}}
+        <div class="empty-inline">该供应商暂无关联商品</div>
+        {{end}}
+      </div>
+    </section>
+  </div>
+
+</div>
+{{end}}

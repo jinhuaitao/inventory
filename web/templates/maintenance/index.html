@@ -1,0 +1,225 @@
+{{define "content"}}
+<div class="page">
+
+  <div class="page-head">
+    <div>
+      <h2 class="page-title">数据维护</h2>
+      <p class="page-desc">
+        备份与恢复数据库、清理内置演示数据。这里的操作只对管理员开放，
+        其中「恢复」会替换整个数据库。
+      </p>
+    </div>
+    <div class="page-actions">
+      <form method="post" action="/admin/maintenance/backup" class="inline-form">
+        <input type="hidden" name="_csrf" value="{{.CSRF}}">
+        <button type="submit" class="btn btn-primary">立即备份</button>
+      </form>
+    </div>
+  </div>
+
+  {{with index .Data.Errors "form"}}
+  <div class="alert alert-error">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v5"/><circle cx="12" cy="16" r="0.9" fill="currentColor" stroke="none"/></svg>
+    <span>{{.}}</span>
+  </div>
+  {{end}}
+
+  {{if .Data.Pending}}
+  <div class="alert alert-warning">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3.5l9.2 16H2.8l9.2-16z"/><path d="M12 9.5v4.5"/><circle cx="12" cy="16.8" r="0.9" fill="currentColor" stroke="none"/></svg>
+    <span>
+      已暂存一份待恢复的数据库（{{fileSize .Data.Pending.Size}}，商品
+      {{index .Data.Pending.Counts "products"}} 条）。服务重启后会自动换入；
+      若不想要了，点右侧按钮放弃即可。
+    </span>
+    <form method="post" action="/admin/maintenance/restore/discard" class="inline-form">
+      <input type="hidden" name="_csrf" value="{{.CSRF}}">
+      <button type="submit" class="btn btn-xs btn-outline">放弃恢复</button>
+    </form>
+  </div>
+  {{end}}
+
+  <div class="stat-grid">
+    <div class="stat-card">
+      <span class="stat-label">备份数量</span>
+      <span class="stat-value">{{num (len .Data.Backups)}}</span>
+      <span class="stat-foot">自动备份保留最近 {{.Data.BackupKeep}} 份</span>
+    </div>
+
+    <div class="stat-card">
+      <span class="stat-label">最近一次备份</span>
+      {{if .Data.Backups}}
+        <span class="stat-value">{{fileSize (index .Data.Backups 0).Size}}</span>
+        <span class="stat-foot">{{formatDateTime (index .Data.Backups 0).ModTime}}</span>
+      {{else}}
+        <span class="stat-value">—</span>
+        <span class="stat-foot">尚未产生备份</span>
+      {{end}}
+    </div>
+
+    <div class="stat-card">
+      <span class="stat-label">演示数据</span>
+      {{if .Data.HasDemoData}}
+        <span class="stat-value danger">存在</span>
+        <span class="stat-foot">商品 {{.Data.Preview.Products}} 条待清理</span>
+      {{else}}
+        <span class="stat-value ok">无</span>
+        <span class="stat-foot">数据库中未发现内置演示数据</span>
+      {{end}}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h3 class="card-title">数据库备份</h3>
+      <span class="muted"><code>{{.Data.BackupDir}}</code></span>
+    </div>
+    <div class="card-body no-pad">
+      {{if .Data.Backups}}
+      <table class="table">
+        <thead>
+          <tr>
+            <th>文件名</th>
+            <th>大小</th>
+            <th>创建时间</th>
+            <th>类型</th>
+            <th class="actions-col">操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          {{range .Data.Backups}}
+          <tr>
+            <td><div class="cell-title mono">{{.Name}}</div></td>
+            <td class="muted nowrap">{{fileSize .Size}}</td>
+            <td class="muted nowrap">{{formatDateTime .ModTime}}</td>
+            <td>
+              {{if .Auto}}
+                <span class="badge badge-info">自动</span>
+              {{else}}
+                <span class="badge badge-muted">手工</span>
+              {{end}}
+            </td>
+            <td class="actions-col">
+              <a href="/admin/maintenance/backup/download?name={{.Name | urlquery}}"
+                 class="btn btn-xs btn-outline">下载</a>
+              <form method="post" action="/admin/maintenance/backup/delete" class="inline-form"
+                    data-confirm="确定删除备份 {{.Name}} 吗？删除后无法找回。">
+                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                <input type="hidden" name="name" value="{{.Name}}">
+                <button type="submit" class="btn btn-xs btn-danger-ghost">删除</button>
+              </form>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{else}}
+      <div class="empty-inline">还没有备份。点右上角「立即备份」生成第一份。</div>
+      {{end}}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h3 class="card-title">从备份恢复</h3></div>
+    <div class="card-body">
+      <div class="alert alert-warning">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3.5l9.2 16H2.8l9.2-16z"/><path d="M12 9.5v4.5"/><circle cx="12" cy="16.8" r="0.9" fill="currentColor" stroke="none"/></svg>
+        <span>
+          恢复会用上传的文件<b>整体替换</b>当前数据库，并自动重启服务，期间短暂无法访问。
+          当前数据会被归档为 <code>inventory.db.before-restore-&lt;时间戳&gt;</code> 作为回滚点，
+          但请务必先自行下载一份备份。
+        </span>
+      </div>
+
+      <form method="post" action="/admin/maintenance/restore" enctype="multipart/form-data"
+            data-confirm="恢复会替换当前数据库并重启服务，期间无法访问。确认继续？">
+        <input type="hidden" name="_csrf" value="{{.CSRF}}">
+        <div class="field-row">
+          <label for="backup">选择备份文件（.db）</label>
+          <input type="file" id="backup" name="backup" class="input"
+                 accept=".db,application/octet-stream" required>
+          <p class="field-hint">
+            上传后会先做完整性检查并统计各表行数，不通过的文件会被直接拒绝，当前数据不受影响。
+          </p>
+        </div>
+        <div class="form-actions">
+          <button type="submit" class="btn btn-primary">上传并恢复</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h3 class="card-title">演示数据</h3>
+      {{if .Data.HasDemoData}}
+      <form method="post" action="/admin/maintenance/purge-demo-data" class="inline-form"
+            data-confirm="将删除 {{.Data.Preview.Products}} 个演示商品及其库存流水。清理前会自动做一份安全备份。确认继续？">
+        <input type="hidden" name="_csrf" value="{{.CSRF}}">
+        <button type="submit" class="btn btn-danger-ghost">清理演示数据</button>
+      </form>
+      {{end}}
+    </div>
+    <div class="card-body">
+      {{if .Data.HasDemoData}}
+      <p class="muted">
+        首次启动时数据库为空，程序会写入一组内置演示数据方便试用。
+        生产环境默认不再写入，但历史遗留的数据需要在这里清理一次。
+      </p>
+      <dl class="detail-list">
+        <div class="detail-row">
+          <dt>商品</dt>
+          <dd>{{num .Data.Preview.Products}} 条</dd>
+        </div>
+        <div class="detail-row">
+          <dt>库存流水</dt>
+          <dd>{{num .Data.Preview.Movements}} 条</dd>
+        </div>
+        <div class="detail-row">
+          <dt>分类</dt>
+          <dd>{{num .Data.Preview.Categories}} 个</dd>
+        </div>
+        <div class="detail-row">
+          <dt>供应商</dt>
+          <dd>{{num .Data.Preview.Suppliers}} 个</dd>
+        </div>
+        {{if .Data.Preview.SkippedCategories}}
+        <div class="detail-row">
+          <dt>保留的分类</dt>
+          <dd class="muted">{{join .Data.Preview.SkippedCategories "、"}}（仍被商品引用）</dd>
+        </div>
+        {{end}}
+        {{if .Data.Preview.SkippedSuppliers}}
+        <div class="detail-row">
+          <dt>保留的供应商</dt>
+          <dd class="muted">{{join .Data.Preview.SkippedSuppliers "、"}}（仍被商品引用）</dd>
+        </div>
+        {{end}}
+      </dl>
+      {{else}}
+      <div class="empty-inline">数据库中未发现内置演示数据，无需清理。</div>
+      {{end}}
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head"><h3 class="card-title">操作说明</h3></div>
+    <div class="card-body">
+      <ul class="hint-list">
+        <li><b>备份不用停服务。</b>底层走 SQLite 的 <code>VACUUM INTO</code>，取一份读事务快照，
+            产出的单文件已经把 WAL 合并进去，可以直接拷到别的机器使用。</li>
+        <li><b>不要用 <code>cp</code> 拷贝运行中的 <code>inventory.db</code>。</b>
+            WAL 模式下最新数据可能还全在 <code>inventory.db-wal</code> 里，
+            拷主文件很可能得到一个空库。</li>
+        <li><b>自动备份由系统定时任务完成</b>（Debian 走 systemd timer，Alpine 走
+            <code>/etc/periodic/daily</code>），这里的「保留份数」只影响自动命名的备份，
+            手工命名的文件不会被轮转删除。</li>
+        <li><b>恢复是「暂存 + 重启生效」两步。</b>上传后文件先暂存，服务重启时才会换入，
+            因此中途可以放弃。</li>
+        <li><b>换机器时别忘了会话密钥。</b>数据库里没有它，不一致会导致所有人重新登录。</li>
+      </ul>
+    </div>
+  </div>
+
+</div>
+{{end}}

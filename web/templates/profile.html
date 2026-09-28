@@ -1,0 +1,119 @@
+{{define "content"}}
+<div class="page">
+
+  <div class="page-head">
+    <div>
+      <h2 class="page-title">个人资料</h2>
+      <p class="page-desc">管理您的账号信息与登录设备</p>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <section class="card">
+      <div class="card-head"><h2 class="card-title">基本信息</h2></div>
+
+      {{with index .Data.Errors "form"}}
+      <div class="card-body no-pad-bottom"><div class="alert alert-error"><span>{{.}}</span></div></div>
+      {{end}}
+
+      <form method="post" action="/profile" class="form">
+        <input type="hidden" name="_csrf" value="{{.CSRF}}">
+        <div class="card-body">
+          <div class="profile-head">
+            <span class="avatar lg">{{.User.Initials}}</span>
+            <div>
+              <div class="profile-name">{{.User.DisplayName}}</div>
+              <div class="profile-meta">@{{.User.Username}} · {{.User.Role.Label}}</div>
+            </div>
+          </div>
+
+          <div class="field">
+            <label>用户名</label>
+            <input type="text" class="input" value="{{.User.Username}}" disabled>
+            <p class="field-hint">用户名不可修改</p>
+          </div>
+
+          <div class="field">
+            <label for="full_name">姓名</label>
+            <input type="text" id="full_name" name="full_name" value="{{index .Data.Values "full_name"}}"
+                   class="input" placeholder="用于界面展示">
+          </div>
+
+          <div class="field">
+            <label for="email">邮箱</label>
+            <input type="email" id="email" name="email" value="{{index .Data.Values "email"}}"
+                   class="input {{if index .Data.Errors "email"}}is-invalid{{end}}"
+                   placeholder="用于找回密码" required>
+            {{with index .Data.Errors "email"}}<p class="field-error">{{.}}</p>{{end}}
+          </div>
+        </div>
+
+        <div class="card-foot form-actions">
+          <button type="submit" class="btn btn-primary">保存修改</button>
+        </div>
+      </form>
+    </section>
+
+    <div class="stack">
+      <section class="card">
+        <div class="card-head"><h2 class="card-title">账号安全</h2></div>
+        <div class="card-body">
+          <dl class="detail-list">
+            <div class="detail-row"><dt>角色</dt><dd>{{.User.Role.Label}}</dd></div>
+            <div class="detail-row"><dt>账号状态</dt>
+              <dd>{{if .User.IsActive}}<span class="badge badge-success">已启用</span>{{else}}<span class="badge badge-muted">已禁用</span>{{end}}</dd>
+            </div>
+            <div class="detail-row"><dt>最后登录</dt><dd>{{formatDateTimePtr .User.LastLoginAt}}</dd></div>
+            <div class="detail-row"><dt>注册时间</dt><dd>{{formatDateTime .User.CreatedAt}}</dd></div>
+            <div class="detail-row"><dt>活跃设备</dt><dd>{{num .Data.SessionCount}} 台</dd></div>
+            <div class="detail-row"><dt>安全问题</dt>
+              <dd>
+                {{if .Data.SecurityConfigured}}
+                  <span class="badge badge-success">已设置</span>
+                {{else}}
+                  <span class="badge badge-warning">未设置</span>
+                  <span class="muted">忘记密码时无法自助重置</span>
+                {{end}}
+              </dd>
+            </div>
+          </dl>
+          <div class="card-actions-row">
+            <a href="/profile/password" class="btn btn-outline btn-sm">修改密码</a>
+            <a href="/profile/security" class="btn btn-outline btn-sm">安全问题</a>
+            <a href="/profile/sessions" class="btn btn-outline btn-sm">管理登录设备</a>
+          </div>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-head">
+          <h2 class="card-title">最近登录设备</h2>
+          <a href="/profile/sessions" class="card-link">全部</a>
+        </div>
+        <div class="card-body no-pad">
+          {{if .Data.Sessions}}
+          <table class="table table-compact">
+            <thead><tr><th>设备</th><th>IP</th><th>时间</th></tr></thead>
+            <tbody>
+              {{range .Data.Sessions}}
+              <tr>
+                <td>
+                  {{truncate (default .UserAgent "未知设备") 28}}
+                  {{if eq .ID $.Data.CurrentSessionID}}<span class="badge badge-info">当前</span>{{end}}
+                </td>
+                <td class="mono muted">{{default .IP "—"}}</td>
+                <td class="muted nowrap">{{relativeTime .CreatedAt}}</td>
+              </tr>
+              {{end}}
+            </tbody>
+          </table>
+          {{else}}
+          <div class="empty-inline">暂无登录记录</div>
+          {{end}}
+        </div>
+      </section>
+    </div>
+  </div>
+
+</div>
+{{end}}

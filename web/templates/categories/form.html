@@ -1,0 +1,44 @@
+{{define "content"}}
+<div class="page page-narrow">
+
+  <div class="page-head">
+    <div>
+      <h2 class="page-title">{{if .Data.IsEdit}}编辑分类{{else}}新建分类{{end}}</h2>
+      <p class="page-desc">分类用于对商品进行归类，便于筛选与统计。</p>
+    </div>
+    <div class="page-actions">
+      <a href="/categories" class="btn btn-ghost">返回列表</a>
+    </div>
+  </div>
+
+  {{with index .Data.Errors "form"}}
+  <div class="alert alert-error"><span>{{.}}</span></div>
+  {{end}}
+
+  <form method="post" action="{{if .Data.IsEdit}}/categories/{{.Data.Category.ID}}{{else}}/categories{{end}}" class="card form">
+    <input type="hidden" name="_csrf" value="{{.CSRF}}">
+
+    <div class="card-body">
+      <div class="field">
+        <label for="name">分类名称 <span class="req">*</span></label>
+        <input type="text" id="name" name="name" value="{{index .Data.Values "name"}}"
+               class="input {{if index .Data.Errors "name"}}is-invalid{{end}}"
+               placeholder="例如 电子配件" required autofocus>
+        {{with index .Data.Errors "name"}}<p class="field-error">{{.}}</p>{{end}}
+      </div>
+
+      <div class="field">
+        <label for="description">描述</label>
+        <textarea id="description" name="description" rows="3" class="input textarea"
+                  placeholder="选填，简单说明该分类包含哪些商品">{{index .Data.Values "description"}}</textarea>
+      </div>
+    </div>
+
+    <div class="card-foot form-actions">
+      <a href="/categories" class="btn btn-ghost">取消</a>
+      <button type="submit" class="btn btn-primary">{{if .Data.IsEdit}}保存修改{{else}}创建分类{{end}}</button>
+    </div>
+  </form>
+
+</div>
+{{end}}
