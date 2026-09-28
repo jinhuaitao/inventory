@@ -237,8 +237,8 @@ show_menu() {
     check_root
     while true; do
         print_logo
-        echo -e " ${GREEN}1.${PLAIN} 安装 Inventory Server ${YELLOW}(Install)${PLAIN}"
-        echo -e " ${GREEN}2.${PLAIN} 卸载 Inventory Server ${YELLOW}(Uninstall)${PLAIN}"
+        echo -e " ${GREEN}1.${PLAIN} 安装 库存管理系统 ${YELLOW}(Install)${PLAIN}"
+        echo -e " ${GREEN}2.${PLAIN} 卸载 库存管理系统 ${YELLOW}(Uninstall)${PLAIN}"
         echo -e " ${GREEN}0.${PLAIN} 退出脚本 ${YELLOW}(Exit)${PLAIN}"
         echo ""
         print_line
