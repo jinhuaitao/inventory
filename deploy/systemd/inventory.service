@@ -1,0 +1,74 @@
+# 库存管理系统 —— systemd 单元（Debian / Ubuntu / CentOS / Rocky 等）
+#
+# 目录约定（deploy/install.sh 会照此创建）：
+#   /opt/inventory/bin/inventory-server   可执行文件
+#   /opt/inventory                        工作目录
+#   /var/lib/inventory                    数据库目录（由 StateDirectory 自动创建）
+#   /var/backups/inventory                备份目录（Web「数据维护」页与定时任务共用）
+#   /etc/inventory/inventory.env          环境变量文件
+#
+# ⚠️ 在线更新依赖「重命名 + 就地替换」自身二进制，因此：
+#    1) 安装目录必须对服务用户可写 —— 见下方 ReadWritePaths；
+#    2) 不要把二进制放进 /usr/local/bin 这类只读位置，否则更新会报
+#       「备份当前版本失败（请确认对 ... 有写权限）」；
+#    3) 更新用 syscall.Exec 替换进程映像，PID 保持不变，systemd 会继续正常
+#       跟踪同一个进程，因此不需要 Restart=always，也不会出现重复进程。
+#
+# 如果你修改了安装路径，请同步改 ExecStart 与 ReadWritePaths。
+
+[Unit]
+Description=库存管理系统 (Inventory Management System)
+Documentation=https://github.com/jinhuaitao/inventory
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=inventory
+Group=inventory
+WorkingDirectory=/opt/inventory
+
+# 环境变量文件；前缀 - 表示文件不存在时不报错
+EnvironmentFile=-/etc/inventory/inventory.env
+Environment=INVENTORY_ENV=production
+Environment=INVENTORY_ADDR=:8080
+Environment=INVENTORY_DATA_DIR=/var/lib/inventory
+Environment=INVENTORY_BACKUP_DIR=/var/backups/inventory
+
+ExecStart=/opt/inventory/bin/inventory-server
+
+# 更新是原地 exec，正常情况下进程不会退出；这里只兜底真正的异常退出
+Restart=on-failure
+RestartSec=3
+
+# 自更新需要重命名并覆盖自己的二进制，安装目录必须可写；
+# 备份目录可写是为了让 Web「数据维护」页能创建 / 删除备份。
+ReadWritePaths=/opt/inventory /var/backups/inventory
+
+# 数据库目录：systemd 自动创建，并授予服务用户读写权限
+StateDirectory=inventory
+StateDirectoryMode=0750
+
+# ---------- 加固 ----------
+# 以下选项需要 systemd 232+（Debian 10 / Ubuntu 18.04 及以上均满足）
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictRealtime=true
+RemoveIPC=true
+UMask=0027
+
+# ---------- 日志 ----------
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=inventory
+
+[Install]
+WantedBy=multi-user.target

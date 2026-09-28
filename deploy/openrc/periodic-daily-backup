@@ -1,0 +1,52 @@
+#!/bin/sh
+#
+# 库存管理系统 —— 每日数据库备份（Alpine / OpenRC）
+#
+# 安装位置：/etc/periodic/daily/inventory-backup
+# 由 BusyBox crond 每日执行，需要 crond 处于运行状态：
+#   rc-update add crond default && rc-service crond start
+#
+# 手动执行一次：/etc/periodic/daily/inventory-backup
+#
+# 为什么不用 cp：
+#   SQLite 开了 WAL 模式，最新提交的数据可能还在 inventory.db-wal 里，
+#   服务运行中直接 cp inventory.db 可能拷到一个几乎空的库。
+#   --backup-db 走 VACUUM INTO（读事务快照），**不需要停服务**。
+
+set -eu
+
+BIN="/opt/inventory/bin/inventory-server"
+
+# 先读服务配置，再解析变量 —— 顺序不能反。
+# 若在 source 之前就把 INVENTORY_BACKUP_DIR 取出来，/etc/conf.d/inventory 里
+# 的设置将永远不生效（取值时它还没被 source）。
+if [ -f /etc/conf.d/inventory ]; then
+	# shellcheck disable=SC1091
+	. /etc/conf.d/inventory
+fi
+
+BACKUP_DIR="${INVENTORY_BACKUP_DIR:-/var/backups/inventory}"
+KEEP="${INVENTORY_BACKUP_KEEP:-14}"
+
+export INVENTORY_DATA_DIR="${INVENTORY_DATA_DIR:-/var/lib/inventory}"
+export INVENTORY_DB_PATH="${INVENTORY_DB_PATH:-}"
+export INVENTORY_ENV="${INVENTORY_ENV:-production}"
+export INVENTORY_BACKUP_DIR="$BACKUP_DIR"
+export INVENTORY_BACKUP_KEEP="$KEEP"
+
+if [ ! -x "$BIN" ]; then
+	echo "找不到可执行文件：$BIN" >&2
+	exit 1
+fi
+
+mkdir -p "$BACKUP_DIR"
+
+# 以 inventory 用户执行，保证备份文件属主与服务一致；
+# 该用户对 /var/lib/inventory 有读权限、对备份目录有写权限。
+if id inventory >/dev/null 2>&1; then
+	exec su -s /bin/sh inventory -c \
+		"INVENTORY_DATA_DIR='$INVENTORY_DATA_DIR' INVENTORY_DB_PATH='$INVENTORY_DB_PATH' INVENTORY_ENV='$INVENTORY_ENV' \
+		 '$BIN' --backup-db '$BACKUP_DIR' --keep '$KEEP'"
+fi
+
+exec "$BIN" --backup-db "$BACKUP_DIR" --keep "$KEEP"
