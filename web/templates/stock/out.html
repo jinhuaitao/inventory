@@ -1,0 +1,85 @@
+{{define "content"}}
+<div class="page page-narrow">
+
+  <div class="page-head">
+    <div>
+      <h2 class="page-title">商品出库</h2>
+      <p class="page-desc">录入销售发货、领用等业务。系统会校验库存是否充足，不足时拒绝出库。</p>
+    </div>
+    <div class="page-actions">
+      <a href="/stock/movements" class="btn btn-ghost">查看流水</a>
+    </div>
+  </div>
+
+  {{with index .Data.Errors "form"}}
+  <div class="alert alert-error">
+    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M15 9l-6 6M9 9l6 6"/></svg>
+    <span>{{.}}</span>
+  </div>
+  {{end}}
+
+  <form method="post" action="/stock/out" class="card form" id="stockForm">
+    <input type="hidden" name="_csrf" value="{{.CSRF}}">
+
+    <div class="card-body">
+      <div class="form-grid">
+        <div class="field span-2">
+          <label for="product_id">选择商品 <span class="req">*</span></label>
+          {{$preset := .Data.PresetID}}
+          {{$selected := index .Data.Values "product_id"}}
+          <select id="product_id" name="product_id" class="select" required data-product-select autofocus>
+            <option value="">请选择商品</option>
+            {{range .Data.Products}}
+            <option value="{{.ID}}"
+                    data-qty="{{.Quantity}}" data-unit="{{.Unit}}"
+                    data-cost="{{float .CostPrice 2}}" data-sale="{{float .SalePrice 2}}"
+                    data-safety="{{.SafetyStock}}"
+                    {{if or (eq $preset .ID) (eq $selected (printf "%d" .ID))}}selected{{end}}>
+              {{.SKU}} · {{.Name}}（库存 {{.Quantity}} {{.Unit}}）
+            </option>
+            {{end}}
+          </select>
+          <p class="field-hint" data-product-hint></p>
+        </div>
+
+        <div class="field">
+          <label for="quantity">出库数量 <span class="req">*</span></label>
+          <input type="number" id="quantity" name="quantity" min="1" step="1"
+                 value="{{default (index .Data.Values "quantity") "1"}}" class="input" required>
+          <p class="field-hint" data-qty-hint></p>
+        </div>
+
+        <div class="field">
+          <label for="unit_price">出库单价（元）</label>
+          <input type="number" id="unit_price" name="unit_price" min="0" step="0.01"
+                 value="{{index .Data.Values "unit_price"}}" class="input" placeholder="默认取商品售价"
+                 data-sale-input>
+        </div>
+
+        <div class="field span-2">
+          <label for="ref_no">单据号</label>
+          <input type="text" id="ref_no" name="ref_no" value="{{index .Data.Values "ref_no"}}"
+                 class="input" placeholder="例如 SO-20260928-001">
+        </div>
+
+        <div class="field span-2">
+          <label for="note">备注</label>
+          <textarea id="note" name="note" rows="2" class="input textarea"
+                    placeholder="选填，例如领用部门、客户名称">{{index .Data.Values "note"}}</textarea>
+        </div>
+      </div>
+
+      <div class="calc-preview" data-calc-preview hidden>
+        <span class="calc-label">本次出库金额</span>
+        <span class="calc-value" data-calc-value>¥0.00</span>
+      </div>
+    </div>
+
+    <div class="card-foot form-actions">
+      <a href="/products" class="btn btn-ghost">取消</a>
+      <button type="submit" class="btn btn-primary">确认出库</button>
+    </div>
+  </form>
+
+</div>
+{{end}}

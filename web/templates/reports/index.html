@@ -1,0 +1,154 @@
+{{define "content"}}
+<div class="page">
+
+  <div class="page-head">
+    <div>
+      <h2 class="page-title">库存报表</h2>
+      <p class="page-desc">统计区间 {{.Data.Start}} 至 {{.Data.End}}</p>
+    </div>
+    <div class="page-actions">
+      <form method="get" action="/reports" class="inline-search">
+        <input type="date" name="start" value="{{.Data.Start}}" class="input date-input">
+        <span class="range-sep">至</span>
+        <input type="date" name="end" value="{{.Data.End}}" class="input date-input">
+        <button type="submit" class="btn btn-secondary">查询</button>
+      </form>
+    </div>
+  </div>
+
+  <!-- 区间汇总 -->
+  <section class="stat-grid stat-grid-4">
+    <div class="stat-card">
+      <div class="stat-label">区间入库量</div>
+      <div class="stat-value text-in">{{num .Data.Summary.InQuantity}}</div>
+      <div class="stat-foot">金额 {{money .Data.Summary.InAmount}}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">区间出库量</div>
+      <div class="stat-value text-out">{{num .Data.Summary.OutQuantity}}</div>
+      <div class="stat-foot">金额 {{money .Data.Summary.OutAmount}}</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">净库存变化</div>
+      <div class="stat-value">{{num (sub .Data.Summary.InQuantity .Data.Summary.OutQuantity)}}</div>
+      <div class="stat-foot">入库减出库</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">当前库存总值</div>
+      <div class="stat-value">{{money .Data.Stats.StockValue}}</div>
+      <div class="stat-foot">{{num .Data.Stats.TotalProducts}} 个在售商品</div>
+    </div>
+  </section>
+
+  <!-- 趋势 -->
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">近 30 天出入库趋势</h2>
+      <div class="legend">
+        <span class="legend-item"><i class="dot in"></i>入库</span>
+        <span class="legend-item"><i class="dot out"></i>出库</span>
+      </div>
+    </div>
+    <div class="card-body">
+      {{if gt .Data.MaxTrend 0}}
+      <div class="chart chart-wide">
+        {{$max := .Data.MaxTrend}}
+        {{range .Data.Trend}}
+        <div class="chart-col" title="{{.Label}}　入库 {{.In}}　出库 {{.Out}}">
+          <div class="chart-pair">
+            <div class="chart-bar bar-in" style="height: {{barHeight .In $max}}%"></div>
+            <div class="chart-bar bar-out" style="height: {{barHeight .Out $max}}%"></div>
+          </div>
+          <span class="chart-label">{{.Label}}</span>
+        </div>
+        {{end}}
+      </div>
+      {{else}}
+      <div class="empty-inline">近 30 天暂无出入库记录</div>
+      {{end}}
+    </div>
+  </section>
+
+  <div class="grid-2">
+    <section class="card">
+      <div class="card-head"><h2 class="card-title">分类库存价值分布</h2></div>
+      <div class="card-body">
+        {{if .Data.CategoryStats}}
+        <div class="hbar-list">
+          {{$total := .Data.CategoryTotal}}
+          {{range .Data.CategoryStats}}
+          <div class="hbar-row">
+            <span class="hbar-name" title="{{.Name}}">{{truncate .Name 10}}</span>
+            <div class="hbar-track"><div class="hbar-fill" style="width: {{pct .Value $total}}%"></div></div>
+            <span class="hbar-value">{{money .Value}}</span>
+          </div>
+          {{end}}
+        </div>
+        {{else}}
+        <div class="empty-inline">暂无数据</div>
+        {{end}}
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="card-head"><h2 class="card-title">近 30 天出库排行</h2></div>
+      <div class="card-body no-pad">
+        {{if .Data.TopMoving}}
+        <table class="table table-compact">
+          <thead><tr><th>商品</th><th class="num">出库量</th><th class="num">金额</th></tr></thead>
+          <tbody>
+            {{range .Data.TopMoving}}
+            <tr>
+              <td>
+                <div class="cell-title">{{truncate .Name 18}}</div>
+                <div class="cell-sub">{{.SKU}}</div>
+              </td>
+              <td class="num strong">{{num .Quantity}}</td>
+              <td class="num">{{money .Value}}</td>
+            </tr>
+            {{end}}
+          </tbody>
+        </table>
+        {{else}}
+        <div class="empty-inline">暂无数据</div>
+        {{end}}
+      </div>
+    </section>
+  </div>
+
+  <section class="card">
+    <div class="card-head">
+      <h2 class="card-title">库存价值 TOP 10</h2>
+      <a href="/products/export" class="card-link">导出商品明细</a>
+    </div>
+    <div class="card-body no-pad">
+      {{if .Data.TopProducts}}
+      <table class="table">
+        <thead>
+          <tr><th>商品</th><th class="num">库存</th><th class="num">价值</th><th>占比</th></tr>
+        </thead>
+        <tbody>
+          {{$sv := .Data.Stats.StockValue}}
+          {{range .Data.TopProducts}}
+          <tr>
+            <td>
+              <div class="cell-title">{{.Name}}</div>
+              <div class="cell-sub">{{.SKU}}</div>
+            </td>
+            <td class="num">{{num .Quantity}}</td>
+            <td class="num strong">{{money .Value}}</td>
+            <td>
+              <div class="hbar-track thin"><div class="hbar-fill" style="width: {{pct .Value $sv}}%"></div></div>
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{else}}
+      <div class="empty-inline">暂无数据</div>
+      {{end}}
+    </div>
+  </section>
+
+</div>
+{{end}}

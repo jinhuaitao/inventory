@@ -1,0 +1,60 @@
+{{define "content"}}
+<div class="page page-narrow">
+
+  <div class="page-head">
+    <div>
+      <h2 class="page-title">登录设备</h2>
+      <p class="page-desc">当前共有 {{num (len .Data.Sessions)}} 台设备处于登录状态</p>
+    </div>
+    <div class="page-actions">
+      <form method="post" action="/profile/sessions/revoke-all" class="inline-form"
+            data-confirm="确定退出除当前设备外的所有登录吗？">
+        <input type="hidden" name="_csrf" value="{{.CSRF}}">
+        <button type="submit" class="btn btn-outline">退出其它设备</button>
+      </form>
+      <a href="/profile" class="btn btn-ghost">返回</a>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body no-pad">
+      {{if .Data.Sessions}}
+      <table class="table">
+        <thead>
+          <tr><th>设备信息</th><th>IP 地址</th><th>登录时间</th><th>有效期至</th><th class="actions-col">操作</th></tr>
+        </thead>
+        <tbody>
+          {{range .Data.Sessions}}
+          <tr>
+            <td>
+              <div class="cell-title">
+                {{truncate (default .UserAgent "未知设备") 40}}
+                {{if eq .ID $.Data.CurrentSessionID}}<span class="badge badge-info">当前设备</span>{{end}}
+              </div>
+            </td>
+            <td class="mono muted">{{default .IP "—"}}</td>
+            <td class="muted nowrap">{{formatDateTime .CreatedAt}}</td>
+            <td class="muted nowrap">{{formatDateTime .ExpiresAt}}</td>
+            <td class="actions-col">
+              {{if ne .ID $.Data.CurrentSessionID}}
+              <form method="post" action="/profile/sessions/revoke" class="inline-form">
+                <input type="hidden" name="_csrf" value="{{$.CSRF}}">
+                <input type="hidden" name="session_id" value="{{.ID}}">
+                <button type="submit" class="btn btn-xs btn-danger-ghost">退出</button>
+              </form>
+              {{else}}
+              <span class="muted">—</span>
+              {{end}}
+            </td>
+          </tr>
+          {{end}}
+        </tbody>
+      </table>
+      {{else}}
+      <div class="empty-inline">暂无登录设备</div>
+      {{end}}
+    </div>
+  </div>
+
+</div>
+{{end}}
