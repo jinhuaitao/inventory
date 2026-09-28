@@ -43,8 +43,20 @@ jobs:
         run: |
           unformatted="$(gofmt -l ./cmd ./internal ./web)"
           if [ -n "$unformatted" ]; then
+            echo "::error::代码格式检查未通过，请修复后重新提交"
+            echo
             echo "以下文件未通过 gofmt 格式化："
             echo "$unformatted"
+            echo
+            # 直接把差异打出来。只报文件名的话，最常见的问题
+            # （行尾多一个制表符、空行里有空格）肉眼几乎看不出来。
+            echo "----- 需要做的改动（gofmt -d） -----"
+            printf '%s\n' "$unformatted" | while IFS= read -r f; do
+              [ -n "$f" ] && gofmt -d "$f"
+            done
+            echo "-----------------------------------"
+            echo
+            echo "修复方式：本地执行 make fmt（等价于 gofmt -w ./cmd ./internal ./web）后重新提交。"
             exit 1
           fi
           echo "所有 Go 文件格式正确"
