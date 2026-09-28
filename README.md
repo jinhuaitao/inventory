@@ -39,6 +39,7 @@
 - **两种发布形态** — 同时支持 `tar.gz` / `zip` 归档与裸可执行文件；裸二进制在落盘前会校验文件头是否匹配当前平台
 - **完整性校验** — 下载后比对 SHA-256：优先取发布中的 `checksums.txt`，缺失时回退到 GitHub 附件摘要，不通过立即中止，绝不替换文件
 - **自动备份** — 替换前把当前版本改名为 `<程序名>.old`，随时可手动回滚
+- **就地重启** — 用 `syscall.Exec` 替换进程映像，PID 不变，systemd / OpenRC 都能正确跟踪
 - **防 SSRF** — 只允许从 GitHub 官方域名下载，拒绝任何其他主机与明文 HTTP
 - **命令行巡检** — `--check-update` 可在部署脚本或定时任务里检查版本
 
@@ -46,28 +47,44 @@
 
 - **零 CGO** — 使用 `modernc.org/sqlite` 纯 Go 驱动，交叉编译无障碍
 - **单文件部署** — 模板与静态资源通过 `embed.FS` 嵌入二进制
+- **开箱可用的服务定义** — 自带 systemd 单元与 OpenRC 服务脚本，一条命令装成系统服务
+- **演示数据可关可清** — 生产环境默认不写入；历史遗留的演示数据可用 `--purge-demo-data` 精确清理
+- **安全备份与迁移** — `--backup-db` 基于 `VACUUM INTO` 取读事务快照，**不用停服务**，产出的单文件已合并 WAL，直接拷走即可；安装脚本默认配好每日自动备份与轮转
 - **优雅关闭** — 监听 `SIGINT`/`SIGTERM`，等待请求处理完毕
 - **结构化日志** — `log/slog`，开发环境文本、生产环境 JSON
 - **健康探针** — `/healthz`（存活）与 `/readyz`（就绪，含数据库连通性）
 - **后台清理** — 每小时清理过期会话、登录记录与找回密码记录
-- **74 个单元测试** — 含并发写入一致性验证（10 协程 × 10 次入库，校验无丢失更新）
+- **300+ 单元测试** — 含并发写入一致性验证（10 协程 × 10 次入库，校验无丢失更新）
 
 ## 🚀 快速开始
 
 ### 方式一：下载预编译二进制（推荐）
 
-前往 [Releases](https://github.com/jinhuaitao/inventory/releases) 下载对应平台压缩包：
+前往 [Releases](https://github.com/jinhuaitao/inventory/releases) 下载对应架构的**裸可执行文件**（静态链接、无 CGO，glibc 与 musl 均可直接运行）：
 
 | 平台 | 文件 |
 | --- | --- |
-| Linux x86_64 | `inventory-server-*-linux-amd64.tar.gz` |
-| Linux ARM64 | `inventory-server-*-linux-arm64.tar.gz` |
+| Linux x86_64 | `inventory-server-amd64` |
+| Linux ARM64 | `inventory-server-arm64` |
+| 校验和 | `checksums.txt` |
 
 ```bash
-tar -xzf inventory-server-*.tar.gz
-chmod +x inventory-server-*
-./inventory-server-*
+curl -fLO https://github.com/jinhuaitao/inventory/releases/latest/download/inventory-server-amd64
+chmod +x inventory-server-amd64
+./inventory-server-amd64
 ```
+
+生产环境建议直接用一键脚本安装为系统服务（自动生成配置与随机会话密钥）：
+
+```bash
+# Debian / Ubuntu（systemd）
+sudo ./deploy/install.sh
+
+# Alpine Linux（OpenRC）
+sudo ./deploy/install.sh
+```
+
+详见 [deploy/README.md](deploy/README.md)。
 
 ### 方式二：从源码编译
 
@@ -83,7 +100,8 @@ go build -o inventory-server ./cmd/server
 
 浏览器打开 <http://localhost:8080>
 
-首次启动会自动创建数据库并写入演示数据，默认管理员账号：
+首次启动时，如果数据库为空，会自动创建默认管理员账号；**开发环境**还会额外写入一组
+演示数据（4 个分类、3 个供应商、12 个商品）方便试用：
 
 | 用户名 | 密码 |
 | --- | --- |
@@ -91,11 +109,25 @@ go build -o inventory-server ./cmd/server
 
 > ⚠️ **请登录后立即修改管理员密码。** 生产环境务必通过 `INVENTORY_ADMIN_PASSWORD` 指定强密码。
 
+演示数据的写入受 `INVENTORY_SEED_DEMO_DATA` 控制：**不设置时生产环境为关闭、其他环境为开启**。
+若库里已经存在演示数据，可用下面的命令清理（先预览，再执行）：
+
+```bash
+./inventory-server --purge-demo-data --dry-run   # 只统计，不改动
+./inventory-server --purge-demo-data             # 实际清理
+```
+
+清理只针对内置演示数据，管理员账号与自建数据不受影响；仍被商品引用的分类 / 供应商会被保留并列出。
+
 ### 命令行参数
 
 ```bash
-./inventory-server --version        # 打印版本与构建信息
-./inventory-server --check-update   # 检查是否有新版本后退出
+./inventory-server --version                     # 打印版本与构建信息
+./inventory-server --check-update                # 检查是否有新版本后退出
+./inventory-server --purge-demo-data             # 清理内置演示数据后退出
+./inventory-server --purge-demo-data --dry-run   # 只预览将要删除的数据
+./inventory-server --backup-db ./backups         # 备份数据库（不用停服务）
+./inventory-server --backup-db ./backups --keep 7  # 备份并只保留最近 7 份
 ```
 
 ## 🔑 找回密码
@@ -165,6 +197,7 @@ go build -o inventory-server ./cmd/server
 | `INVENTORY_ADMIN_USERNAME` | `admin` | 初始化管理员用户名 |
 | `INVENTORY_ADMIN_EMAIL` | `admin@example.com` | 初始化管理员邮箱 |
 | `INVENTORY_ADMIN_PASSWORD` | `Admin@12345` | 初始化管理员密码 |
+| `INVENTORY_SEED_DEMO_DATA` | 随环境（生产 `false`） | 数据库为空时是否写入内置演示数据 |
 
 ### 在线更新
 
@@ -207,11 +240,60 @@ go build -o inventory-server ./cmd/server
    - 原子替换并自动重启服务（通常几秒钟）
 4. 更新完成后页面会自动刷新，可确认版本号已变更
 
+### 重启是怎么做到的
+
+替换文件之后，程序用 `syscall.Exec` **就地替换进程映像**：
+
+- **PID 保持不变**，因此 systemd 与 OpenRC 都能继续跟踪同一个进程，不会出现「服务已退出」
+  的误判，也不会留下重复进程；
+- 不需要 `Restart=always` 之类的配合，服务定义里只保留异常退出时的兜底重启；
+- 监听端口由内核在 exec 时释放并重新绑定，无需外部进程管理器介入。
+
+> ⚠️ 前提是**运行用户对可执行文件所在目录有写权限**。仓库提供的 systemd 单元已通过
+> `ReadWritePaths=/opt/inventory` 放行；若你换了安装路径，记得同步修改。
+> 权限不足时会返回「备份当前版本失败（请确认对 ... 有写权限）」，且不会改动任何文件。
+
 **回滚方式**：停止服务，把 `<程序名>.old` 覆盖回 `<程序名>`，重新启动即可。
 
 **平台差异**：Windows 无法替换正在运行的程序，系统会把新版本下载为 `<程序名>.new` 并提示手动完成替换。
 
 ## 🐳 生产部署示例
+
+### Debian / Ubuntu（systemd）
+
+```bash
+sudo ./deploy/install.sh
+systemctl status inventory
+journalctl -u inventory -f
+```
+
+### Alpine Linux（OpenRC）
+
+```bash
+sudo ./deploy/install.sh
+rc-service inventory status
+tail -f /var/log/inventory/inventory.log
+```
+
+脚本会自动创建 `inventory` 服务账号、安装二进制到 `/opt/inventory/bin/`、
+生成带随机会话密钥的配置文件、注册开机自启，并配置好**每日自动备份**
+（`/var/backups/inventory`，保留 14 份）。完整说明见
+[deploy/README.md](deploy/README.md)。
+
+### 备份与换机器
+
+数据库开启了 WAL 模式，**运行中直接 `cp inventory.db` 可能拷到一个空库** ——
+最新数据还在 `inventory.db-wal` 里没合并。请用 `--backup-db`：
+
+```bash
+./inventory-server --backup-db /var/backups/inventory   # 不用停服务
+```
+
+它内部走 SQLite 的 `VACUUM INTO`，取读事务快照，产出已合并 WAL 的单文件，
+并会立刻回读校验（`integrity_check` + 各表行数）。换机器的完整步骤见
+[deploy/README.md 第 6 节](deploy/README.md#6-数据库备份与迁移换机器看这里)。
+
+### 手动运行
 
 ```bash
 export INVENTORY_ENV=production
@@ -234,9 +316,6 @@ export INVENTORY_DEFAULT_ROLE=viewer
 
 建议在反向代理（Nginx / Caddy）后运行并启用 HTTPS —— 系统检测到 HTTPS 时会自动加上 HSTS 头，
 同时会话 cookie 会带 `Secure` 标记。
-
-> ⚠️ 自更新需要写权限：请确保运行用户对可执行文件所在目录有写权限，
-> 否则会返回「备份当前版本失败」的明确提示，且不会改动任何文件。
 
 ## 📦 技术栈
 
@@ -269,6 +348,10 @@ export INVENTORY_DEFAULT_ROLE=viewer
 ├── web/
 │   ├── templates/        # 服务端渲染模板
 │   └── static/           # CSS / JS / 图标
+├── deploy/               # 部署资产
+│   ├── install.sh        #   一键安装（自动识别 systemd / OpenRC）
+│   ├── systemd/          #   systemd 单元
+│   └── openrc/           #   OpenRC 服务脚本与配置模板
 └── .github/workflows/    # CI 与 Release 流水线
 ```
 

@@ -1,0 +1,71 @@
+#!/sbin/openrc-run
+#
+# 库存管理系统 —— OpenRC 服务脚本（Alpine Linux）
+#
+# 安装：
+#   install -m 0755 deploy/openrc/inventory       /etc/init.d/inventory
+#   install -m 0600 deploy/openrc/inventory.confd /etc/conf.d/inventory
+#   rc-update add inventory default
+#   rc-service inventory start
+#
+# 目录约定（deploy/install.sh 会照此创建）：
+#   /opt/inventory/bin/inventory-server   可执行文件
+#   /opt/inventory                        工作目录
+#   /var/lib/inventory                    数据库目录
+#   /var/log/inventory/inventory.log      运行日志
+#
+# ⚠️ 在线更新依赖「重命名 + 就地替换」自身二进制，因此：
+#    1) /opt/inventory 必须对运行用户可写；
+#    2) 更新用 syscall.Exec 替换进程映像，PID 保持不变，
+#       supervise-daemon 会继续跟踪同一个进程，不会误判为「服务退出」而重启，
+#       也不会留下孤儿进程。
+#
+# Alpine 使用 musl libc，本程序为纯静态二进制（无 CGO），可直接运行。
+
+name="inventory"
+description="库存管理系统 (Inventory Management System)"
+
+command="/opt/inventory/bin/inventory-server"
+directory="/opt/inventory"
+command_user="inventory:inventory"
+
+# 用 supervise-daemon 托管：自动拉起、日志重定向、崩溃退避
+supervisor="supervise-daemon"
+pidfile="/run/${RC_SVCNAME}.pid"
+respawn_delay=3
+respawn_max=0
+
+INVENTORY_LOG_DIR="${INVENTORY_LOG_DIR:-/var/log/inventory}"
+output_log="${INVENTORY_LOG_DIR}/inventory.log"
+error_log="${INVENTORY_LOG_DIR}/inventory.log"
+
+# 补齐关键默认值（:= 同时覆盖未设置与空值两种情况）
+: "${INVENTORY_ENV:=production}"
+: "${INVENTORY_ADDR:=:8080}"
+: "${INVENTORY_DATA_DIR:=/var/lib/inventory}"
+
+# /etc/conf.d/inventory 由 OpenRC 自动 source，但其中的变量默认**不会**导出，
+# 必须在这里显式 export，否则子进程看不到。
+# 注：导出空值是安全的 —— 程序对空字符串一律按「未设置」处理。
+export INVENTORY_ENV INVENTORY_ADDR INVENTORY_DATA_DIR \
+	INVENTORY_BASE_URL INVENTORY_DB_PATH INVENTORY_LOG_LEVEL \
+	INVENTORY_SESSION_SECRET INVENTORY_SESSION_LIFETIME INVENTORY_REMEMBER_LIFETIME \
+	INVENTORY_ADMIN_USERNAME INVENTORY_ADMIN_EMAIL INVENTORY_ADMIN_PASSWORD \
+	INVENTORY_SEED_DEMO_DATA \
+	INVENTORY_UPDATE_ENABLED INVENTORY_UPDATE_REPO INVENTORY_UPDATE_TOKEN INVENTORY_UPDATE_INTERVAL \
+	INVENTORY_ALLOW_REGISTRATION INVENTORY_DEFAULT_ROLE \
+	INVENTORY_MAX_LOGIN_ATTEMPTS INVENTORY_LOCKOUT_WINDOW
+
+depend() {
+	need net
+	after firewall
+}
+
+start_pre() {
+	checkpath --directory --owner "${command_user}" --mode 0755 "${INVENTORY_DATA_DIR}"
+	checkpath --directory --owner "${command_user}" --mode 0750 "${INVENTORY_LOG_DIR}"
+	checkpath --file --owner "${command_user}" --mode 0640 "${output_log}"
+}
+
+# 注：更新流程会留下 <二进制>.old 作为回滚点，本脚本刻意不清理它。
+#     需要回滚时见 deploy/README.md。
