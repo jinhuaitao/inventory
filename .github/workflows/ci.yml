@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+    tags:
+      - 'v*' # 用于触发 release
+    paths-ignore:
+      - '**.md'
+      - 'LICENSE'
+      - '.gitignore'
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+# 必须有 write 权限才能发 Release
+permissions:
+  contents: write
+
+env:
+  GO_VERSION: '1.27'
+  GOPROXY: https://proxy.golang.org,direct
+
+jobs:
+  # ---------------------------------------------------------------- 代码质量
+  # [注意]: 这里作为入口任务，绝对不能有 needs 字段！
+  lint:
+    name: 代码检查
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+      - name: 下载依赖
+        run: go mod download
+      - name: 校验依赖完整性
+        run: go mod verify
+      - name: 检查代码格式（gofmt）
+        run: |
+          unformatted="$(gofmt -l ./cmd ./internal ./web)"
+          if [ -n "$unformatted" ]; then
+            echo "以下文件未通过 gofmt 格式化："
+            echo "$unformatted"
+            exit 1
+          fi
+          echo "所有 Go 文件格式正确"
+      - name: 静态分析（go vet）
+        run: go vet ./...
+
+  # ------------------------------------------------------------------ 构建测试
+  # [注意]: 这里也没有 needs 字段，它会和 lint 并行开始运行。
+  test:
+    name: 编译与测试
+    runs-on: ubuntu-latest
+    outputs:
+      # 供 release 作业复用，保证「编译进二进制的版本号」与「Release 标签」完全一致
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: 检出代码并拉取所有历史 Tag
+        uses: actions/checkout@v4
+        with:
+          # 计算下一个版本号需要完整的历史 Tag
+          fetch-depth: 0
+
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: 运行单元测试
+        run: go test -v -race -count=1 -coverprofile=coverage.out -covermode=atomic ./...
+
+      # 版本号必须在编译之前算出来。
+      # 原实现直接用 github.ref_name，而本作业是在 push 到 main 时运行的，
+      # 该值为 "main" 而非 Tag，导致发布出去的程序自报版本无法参与比较。
+      - name: 计算本次发布的版本号 (v1.0.xx)
+        id: version
+        run: |
+          LATEST_TAG=$(git tag -l "v1.0.*" | sort -V | tail -n 1)
+          if [ -z "$LATEST_TAG" ]; then
+            NEW_TAG="v1.0.01"
+          else
+            LAST_NUM="${LATEST_TAG##*.}"
+            NEXT_NUM=$((10#$LAST_NUM + 1))
+            NEW_TAG=$(printf "v1.0.%02d" $NEXT_NUM)
+          fi
+          echo "version=$NEW_TAG" >> "$GITHUB_OUTPUT"
+          echo "本次构建版本: $NEW_TAG"
+
+      - name: 构建多架构可执行文件 (amd64 & arm64)
+        env:
+          # 关键：把版本号与更新仓库一起编译进二进制。
+          # 缺少 updateRepo 时，发布出去的产物无法自助检查更新（功能会静默关闭）。
+          LDFLAGS: >-
+            -s -w
+            -X main.version=${{ steps.version.outputs.version }}
+            -X main.commit=${{ github.sha }}
+            -X main.updateRepo=${{ github.repository }}
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath \
+            -ldflags "$LDFLAGS" -o inventory-server-amd64 ./cmd/server
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath \
+            -ldflags "$LDFLAGS" -o inventory-server-arm64 ./cmd/server
+
+      - name: 冒烟验证注入结果
+        run: |
+          ./inventory-server-amd64 --version
+          ./inventory-server-amd64 --check-update
+
+      - name: 生成校验和文件
+        run: |
+          shasum -a 256 inventory-server-amd64 inventory-server-arm64 > checksums.txt
+          cat checksums.txt
+
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: inventory-server-linux
+          path: |
+            inventory-server-amd64
+            inventory-server-arm64
+            checksums.txt
+          retention-days: 7
+
+  # ------------------------------------------------------------ 冒烟测试
+  # 这个任务依赖于 test，所以有 needs
+  smoke:
+    name: 端到端冒烟测试
+    runs-on: ubuntu-latest
+    needs: test 
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+      - name: 安装 Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: 编译并启动服务
+        run: |
+          go build -o inventory-server ./cmd/server
+          INVENTORY_ADDR=127.0.0.1:18080 INVENTORY_DATA_DIR=/tmp/inv-ci ./inventory-server > /tmp/server.log 2>&1 &
+          sleep 5
+          curl -fsS http://127.0.0.1:18080/healthz
+
+  # ------------------------------------------------------------ 发布 Release
+  release:
+    name: 发布到 GitHub Releases
+    runs-on: ubuntu-latest
+    needs: [test, smoke] 
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event_name == 'workflow_dispatch'
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 发布 Release 并上传二进制文件
+        uses: softprops/action-gh-release@v2
+        with:
+          # 与编译进二进制的 main.version 取自同一个作业输出，二者必定一致
+          tag_name: "${{ needs.test.outputs.version }}"
+          name: "Release ${{ needs.test.outputs.version }}"
+          files: |
+            artifacts/inventory-server-linux/inventory-server-amd64
+            artifacts/inventory-server-linux/inventory-server-arm64
+            artifacts/inventory-server-linux/checksums.txt
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
