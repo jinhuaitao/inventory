@@ -21,7 +21,6 @@ import (
 	"strings"
 	"syscall"
 	"time"
-	
 	"inventory/internal/auth"
 	"inventory/internal/config"
 	"inventory/internal/database"
