@@ -1,0 +1,35 @@
+# 二进制与构建产物
+#
+# 注意：这里的规则一律用 `/` 锚定到仓库根目录。
+# 不加锚点时，裸写 `server` 会匹配任意层级的同名目录，
+# 从而把源码目录 cmd/server/ 一并忽略掉，导致入口文件无法入库。
+/bin/
+/dist/
+/inventory
+/inventory-server
+/server
+*.exe
+*.test
+*.out
+
+# 数据库与运行时数据
+/data/
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+
+# 环境变量
+.env
+.env.local
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# 覆盖率
+coverage.out
+coverage.html
