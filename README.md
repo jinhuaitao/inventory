@@ -67,7 +67,12 @@
 
 ## 🚀 快速开始
 
-### 方式一：下载预编译二进制（推荐）
+### 方式一：一键安装（推荐）
+```
+curl -o inventory.sh https://raw.githubusercontent.com/jinhuaitao/inventory/master/inventory.sh && chmod +x inventory.sh && ./inventory.sh
+```
+
+### 方式二：下载预编译二进制
 
 前往 [Releases](https://github.com/jinhuaitao/inventory/releases) 下载对应架构的**裸可执行文件**（静态链接、无 CGO，glibc 与 musl 均可直接运行）：
 
@@ -95,7 +100,7 @@ sudo ./deploy/install.sh
 
 详见 [deploy/README.md](deploy/README.md)。
 
-### 方式二：从源码编译
+### 方式三：从源码编译
 
 ```bash
 git clone https://github.com/jinhuaitao/inventory.git
