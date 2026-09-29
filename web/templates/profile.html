@@ -46,6 +46,15 @@
                    placeholder="用于找回密码" required>
             {{with index .Data.Errors "email"}}<p class="field-error">{{.}}</p>{{end}}
           </div>
+
+          <div class="field">
+            <label for="current_password">当前密码</label>
+            <input type="password" id="current_password" name="current_password"
+                   class="input {{if index .Data.Errors "current_password"}}is-invalid{{end}}"
+                   autocomplete="current-password" placeholder="仅在修改邮箱时需要填写">
+            {{with index .Data.Errors "current_password"}}<p class="field-error">{{.}}</p>{{end}}
+            <p class="field-hint">邮箱是找回密码的凭据，修改时需要验证当前密码；只改姓名可留空</p>
+          </div>
         </div>
 
         <div class="card-foot form-actions">

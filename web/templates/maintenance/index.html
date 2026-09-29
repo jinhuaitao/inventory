@@ -195,9 +195,31 @@
           <dd class="muted">{{join .Data.Preview.SkippedSuppliers "、"}}（仍被商品引用）</dd>
         </div>
         {{end}}
+        {{if .Data.Preview.LegacySKUOnly}}
+        <div class="detail-row">
+          <dt>未清理的同名 SKU</dt>
+          <dd class="muted">
+            {{join .Data.Preview.LegacySKUOnly "、"}}
+            <p class="field-hint">
+              这些商品的 SKU 与内置演示编号相同，但<b>没有</b>演示标记，因此不会被删除。
+              它们既可能是旧版本遗留的演示数据，也可能是您自己创建的商品。
+              确认属于前者时，请在服务器上执行
+              <code>inventory-server --purge-demo-data --purge-legacy-demo</code> 处理。
+            </p>
+          </dd>
+        </div>
+        {{end}}
       </dl>
       {{else}}
       <div class="empty-inline">数据库中未发现内置演示数据，无需清理。</div>
+      {{if .Data.Preview.LegacySKUOnly}}
+      <p class="muted">
+        另有 {{len .Data.Preview.LegacySKUOnly}} 个商品的 SKU 与内置演示编号相同但无演示标记
+        （{{join .Data.Preview.LegacySKUOnly "、"}}），出于安全考虑未做删除。
+        若确认是旧版遗留数据，可在服务器上执行
+        <code>inventory-server --purge-demo-data --purge-legacy-demo</code> 清理。
+      </p>
+      {{end}}
       {{end}}
     </div>
   </div>
