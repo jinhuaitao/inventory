@@ -279,7 +279,11 @@ func (s *Store) SetPassword(ctx context.Context, userID int64, newPassword strin
 	if err != nil {
 		return fmt.Errorf("更新密码失败: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := rowsAffected(res)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrNotFound
 	}
 	return nil
@@ -357,7 +361,11 @@ func (s *Store) DeleteUser(ctx context.Context, userID int64) error {
 	if err != nil {
 		return fmt.Errorf("删除用户失败: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := rowsAffected(res)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrNotFound
 	}
 	return nil

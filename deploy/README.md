@@ -202,9 +202,22 @@ sudo -u inventory /opt/inventory/bin/inventory-server --purge-demo-data
 
 清理规则（宁可漏删也不误删）：
 
-- 商品：`is_demo=1`，或 SKU 命中内置演示 SKU（兼容打标记之前写入的旧库）；
+- 商品：只删 `is_demo=1` 的行；
 - 库存流水：只删除挂在上述商品下的记录；
 - 分类 / 供应商：命中演示清单**且已无商品引用**才会删除，仍被引用的会在输出里列出来。
+
+**旧版本数据库（加 `is_demo` 标记之前写入的）**：那些演示商品没有标记，
+命令会把它们**列出来但不删除**，并提示加 `--purge-legacy-demo` 重跑：
+
+```sh
+# 确认列出的 SKU 确实是旧版遗留的演示数据后
+sudo -u inventory /opt/inventory/bin/inventory-server \
+    --purge-demo-data --purge-legacy-demo
+```
+
+之所以不默认按 SKU 删除：SKU 是用户可以自由填写的业务字段，用户完全可能
+在自己的商品上用 `SKU-1001` 这样的编号。无条件按 SKU 匹配会连带删掉用户自建的
+商品**及其全部库存流水**，而且不可逆。所以默认只认标记，SKU 命中的交给人工判断。
 
 管理员账号不会被删除。命令是幂等的，重复执行会提示「未发现内置演示数据」。
 
@@ -466,6 +479,10 @@ coscmd upload -r /var/backups/inventory/ /inventory-backups/
 | `INVENTORY_DATA_DIR` | 数据库目录，默认 `/var/lib/inventory` |
 | `INVENTORY_ADDR` | 监听地址，默认 `:8080` |
 | `INVENTORY_SEED_DEMO_DATA` | 是否写入演示数据；不设置时 production 为 false、其他为 true |
+| `INVENTORY_TRUSTED_PROXIES` | 允许采信 `X-Forwarded-For` / `X-Real-IP` 的网段，默认 `127.0.0.1/8,::1/128`。代理在别的机器上时必须显式配置，**不要**填 `0.0.0.0/0` |
+| `INVENTORY_DEFAULT_ROLE` | 自助注册者的默认角色，可选 `viewer` / `manager`。**填 `admin` 会让程序拒绝启动**（等于任何人自助获得管理员） |
+| `INVENTORY_MAX_LOGIN_ATTEMPTS` | 同一「账号 + 来源 IP」的失败上限，默认 5。同一账号跨来源的兜底上限是它的 10 倍 |
+| `INVENTORY_LOCKOUT_WINDOW` | 上述失败计数的统计窗口，默认 `15m` |
 | `INVENTORY_BACKUP_DIR` | 备份目录，默认 `/var/backups/inventory`；网页「数据维护」与每日定时任务共用 |
 | `INVENTORY_BACKUP_KEEP` | 自动命名备份的保留份数，默认 14；`0` 表示不自动清理 |
 | `INVENTORY_UPDATE_ENABLED` | 是否启用在线上更新；官方构建已注入仓库地址 |
@@ -506,6 +523,23 @@ server {
 
 同时在环境变量里设置 `INVENTORY_BASE_URL=https://inventory.example.com`。
 
+### 关于来源 IP
+
+程序只有在请求**确实来自可信代理**时才会采信 `X-Forwarded-For` / `X-Real-IP`。
+默认只信任回环地址（`127.0.0.1/8,::1/128`），正好覆盖上面「Nginx 与程序同机」的写法，
+因此这个配置通常不用改。
+
+- 代理在**别的机器或容器**里时，必须把它的网段加进去，否则日志与审计里记录的
+  会是代理自己的地址：
+  ```sh
+  INVENTORY_TRUSTED_PROXIES=127.0.0.1/8,::1/128,10.0.0.0/8
+  ```
+- **不要**配成 `0.0.0.0/0`。那等于任何人都能用一个请求头把自己的来源 IP 改成任意值，
+  基于 IP 的限流与审计会全部失效。
+- 取值时用的是 `X-Forwarded-For` 里**最右侧的不可信地址**（不是最左侧）。
+  Nginx 的 `$proxy_add_x_forwarded_for` 是**追加**，所以最左边那一段是客户端
+  自己塞进来的伪造值，取它会踩坑。
+
 ---
 
 ## 9. 故障排查
@@ -513,6 +547,9 @@ server {
 | 现象 | 原因与处理 |
 | --- | --- |
 | 启动即退出，日志提示「生产环境必须设置 INVENTORY_SESSION_SECRET」 | 在环境变量文件里填入 32 字节随机串 |
+| 启动即退出，提示「INVENTORY_DEFAULT_ROLE 不能是 admin」 | 自助注册默认给管理员等于人人都是管理员；改成 `viewer` / `manager` |
+| 启动即退出，提示「INVENTORY_TRUSTED_PROXIES 解析失败」 | 网段写错了；支持 CIDR 与裸 IP，逗号分隔 |
+| 日志里的来源 IP 全是 `127.0.0.1` 或代理地址 | 代理不在默认可信网段内；用 `INVENTORY_TRUSTED_PROXIES` 加上它 |
 | 更新报「备份当前版本失败（请确认对 ... 有写权限）」 | 安装目录不可写；检查属主与 `ReadWritePaths` |
 | 更新报「无法访问 GitHub」/ 超时 | 服务器无法直连 GitHub；配置 `INVENTORY_UPDATE_TOKEN` 或改用内网发布源 |
 | 更新后版本号没变 | 确认是否手动把二进制放进了只读目录；正常情况下进程会以新版本重启 |

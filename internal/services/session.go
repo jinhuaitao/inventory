@@ -86,7 +86,10 @@ func (s *Store) DeleteSessionsByUser(ctx context.Context, userID int64, exceptTo
 	if err != nil {
 		return 0, fmt.Errorf("删除会话失败: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := rowsAffected(res)
+	if err != nil {
+		return 0, err
+	}
 	return n, nil
 }
 
@@ -98,7 +101,11 @@ func (s *Store) DeleteSessionByID(ctx context.Context, id, userID int64) error {
 	if err != nil {
 		return fmt.Errorf("删除会话失败: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := rowsAffected(res)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrNotFound
 	}
 	return nil
@@ -110,7 +117,10 @@ func (s *Store) CleanupExpiredSessions(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("清理过期会话失败: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := rowsAffected(res)
+	if err != nil {
+		return 0, err
+	}
 	return n, nil
 }
 
@@ -163,12 +173,25 @@ func (s *Store) RecordRecoveryAttempt(ctx context.Context, userID int64, identif
 	return nil
 }
 
-// CountFailedRecovery 统计某账号在给定时间之后的失败次数。
+// RecordBlockedRecoveryAttempt 记录一次「因已被限流而拒绝」的找回密码尝试。
+// 与 RecordBlockedLoginAttempt 同理：只留痕，不参与失败计数，
+// 否则攻击者持续发请求就能让锁定窗口无限顺延，受害者永远无法自助找回密码。
+func (s *Store) RecordBlockedRecoveryAttempt(ctx context.Context, userID int64, identifier, ip string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO recovery_attempts (user_id, identifier, ip, success, blocked, created_at)
+		VALUES (?, ?, ?, 0, 1, ?)`, userID, identifier, ip, nowUTC())
+	if err != nil {
+		return fmt.Errorf("记录被限流的找回密码尝试失败: %w", err)
+	}
+	return nil
+}
+
+// CountFailedRecovery 统计某账号在给定时间之后的失败次数（不含被限流的尝试）。
 func (s *Store) CountFailedRecovery(ctx context.Context, userID int64, since time.Time) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM recovery_attempts
-		WHERE user_id = ? AND success = 0 AND created_at >= ?`,
+		WHERE user_id = ? AND success = 0 AND blocked = 0 AND created_at >= ?`,
 		userID, since.UTC()).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("统计找回密码失败次数失败: %w", err)
@@ -185,8 +208,40 @@ func (s *Store) CountFailedRecoveryByIdentifier(ctx context.Context, identifier 
 	var n int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM recovery_attempts
-		WHERE identifier = ? AND success = 0 AND created_at >= ?`,
+		WHERE identifier = ? AND success = 0 AND blocked = 0 AND created_at >= ?`,
 		identifier, since.UTC()).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("统计找回密码失败次数失败: %w", err)
+	}
+	return n, nil
+}
+
+// CountFailedRecoveryByIdentifierAndIP 统计「某标识 + 某来源 IP」的失败次数。
+//
+// 与登录限流同理：只看标识会让人用几个请求就把别人锁在自助找回之外，
+// 因此主力维度要收敛到具体来源。
+func (s *Store) CountFailedRecoveryByIdentifierAndIP(ctx context.Context, identifier, ip string, since time.Time) (int, error) {
+	if identifier == "" {
+		return 0, nil
+	}
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM recovery_attempts
+		WHERE identifier = ? AND ip = ? AND success = 0 AND blocked = 0 AND created_at >= ?`,
+		identifier, ip, since.UTC()).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("统计找回密码失败次数失败: %w", err)
+	}
+	return n, nil
+}
+
+// CountFailedRecoveryByUserAndIP 统计「某账号 + 某来源 IP」的答题失败次数。
+func (s *Store) CountFailedRecoveryByUserAndIP(ctx context.Context, userID int64, ip string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM recovery_attempts
+		WHERE user_id = ? AND ip = ? AND success = 0 AND blocked = 0 AND created_at >= ?`,
+		userID, ip, since.UTC()).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("统计找回密码失败次数失败: %w", err)
 	}
@@ -206,7 +261,10 @@ func (s *Store) CleanupRecoveryAttempts(ctx context.Context, before time.Time) (
 	if err != nil {
 		return 0, fmt.Errorf("清理找回密码记录失败: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := rowsAffected(res)
+	if err != nil {
+		return 0, err
+	}
 	return n, nil
 }
 
@@ -229,13 +287,46 @@ func (s *Store) RecordLoginAttempt(ctx context.Context, identifier, ip string, s
 	return nil
 }
 
-// CountFailedAttempts 统计某标识在给定时间之后的失败次数。
+// RecordBlockedLoginAttempt 记录一次「因已被限流而拒绝」的登录尝试。
+//
+// ⚠️ 这类记录必须与普通失败区分开（blocked = 1），否则会形成自我延长的锁定：
+// 限流判断发生在密码校验**之前**，攻击者只要在被锁期间持续发请求，
+// 每次都会写入一条新的失败记录、把计数窗口一路往后推，
+// 受害者的账号就**永远不会解锁** —— 一个请求/分钟即可永久拒绝服务。
+// 因此 blocked 记录只用于审计留痕，不参与 CountFailedAttempts 的统计。
+func (s *Store) RecordBlockedLoginAttempt(ctx context.Context, identifier, ip string) error {
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO login_attempts (identifier, ip, success, blocked, created_at)
+		VALUES (?, ?, 0, 1, ?)`, identifier, ip, nowUTC())
+	if err != nil {
+		return fmt.Errorf("记录被限流的登录尝试失败: %w", err)
+	}
+	return nil
+}
+
+// CountFailedAttempts 统计某标识在给定时间之后的失败次数（不含被限流的尝试）。
 func (s *Store) CountFailedAttempts(ctx context.Context, identifier string, since time.Time) (int, error) {
 	var n int
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM login_attempts
-		WHERE identifier = ? AND success = 0 AND created_at >= ?`,
+		WHERE identifier = ? AND success = 0 AND blocked = 0 AND created_at >= ?`,
 		identifier, since.UTC()).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("统计登录失败次数失败: %w", err)
+	}
+	return n, nil
+}
+
+// CountFailedAttemptsByIdentifierAndIP 统计「某标识 + 某来源 IP」在给定时间之后的失败次数。
+//
+// 这是抵御定向暴力破解的主力维度：把限流收敛到具体的攻击来源，
+// 单个 IP 打满额度只会锁住它自己，不会波及从别处正常登录的账号主人。
+func (s *Store) CountFailedAttemptsByIdentifierAndIP(ctx context.Context, identifier, ip string, since time.Time) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM login_attempts
+		WHERE identifier = ? AND ip = ? AND success = 0 AND blocked = 0 AND created_at >= ?`,
+		identifier, ip, since.UTC()).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("统计登录失败次数失败: %w", err)
 	}
@@ -255,6 +346,9 @@ func (s *Store) CleanupLoginAttempts(ctx context.Context, before time.Time) (int
 	if err != nil {
 		return 0, fmt.Errorf("清理登录记录失败: %w", err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := rowsAffected(res)
+	if err != nil {
+		return 0, err
+	}
 	return n, nil
 }

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	"inventory/internal/models"
+	"inventory/internal/utils"
 )
 
 // Config 保存应用的全部运行时配置。
@@ -60,10 +62,19 @@ type Config struct {
 	MaxLoginAttempts int
 	LockoutWindow    time.Duration
 
+	// TrustedProxies 是允许采信 X-Forwarded-For / X-Real-IP 的网段。
+	//
+	// 为空表示**不信任任何**转发头，一律使用 TCP 层的对端地址 ——
+	// 这是安全默认值：转发头可被客户端随意伪造，只有确实来自反向代理
+	// 时才该采信。默认只信任回环地址，覆盖「Nginx 与本服务同机」这一
+	// 最常见部署；代理在别的机器 / 容器里时请显式配置。
+	TrustedProxies []*net.IPNet
+
 	// 是否允许注册（关闭后只能由管理员创建账号）
 	AllowRegistration bool
 
-	// 自助注册用户的默认角色：viewer（只读）/ manager（仓管员）/ admin
+	// 自助注册用户的默认角色：viewer（只读）/ manager（仓管员）。
+	// 刻意不允许 admin —— 那等于「任何人自助获得管理员」。
 	DefaultRole string
 }
 
@@ -97,6 +108,13 @@ func LoadStorageOnly() *Config {
 
 // defaultBackupKeep 是备份目录默认保留的份数。
 const defaultBackupKeep = 14
+
+// defaultTrustedProxies 只信任回环地址。
+//
+// 覆盖「Nginx / Caddy 与本服务装在同一台机器」这一最常见部署；
+// 代理在别的机器或容器里时，必须显式配置对应网段，
+// 否则转发头会被忽略（日志里看到的将是代理的地址）。
+const defaultTrustedProxies = "127.0.0.1/8,::1/128"
 
 // resolveBackupDir 在未显式配置时把备份目录放到数据目录下的 backups/。
 func resolveBackupDir(configured, dataDir string) string {
@@ -138,17 +156,32 @@ func Load() (*Config, error) {
 		LockoutWindow:    envDuration("INVENTORY_LOCKOUT_WINDOW", 15*time.Minute),
 
 		AllowRegistration: envBool("INVENTORY_ALLOW_REGISTRATION", true),
-		DefaultRole:       strings.ToLower(env("INVENTORY_DEFAULT_ROLE", "viewer")),
+		// 先 trim 再小写：环境变量里带空格是常见笔误，
+		// 若不处理会落到 default 分支报「取值不合法」，
+		// 掩盖掉「你配了 admin」这个真正重要的问题。
+		DefaultRole: strings.ToLower(strings.TrimSpace(env("INVENTORY_DEFAULT_ROLE", "viewer"))),
 
 		BackupDir:  env("INVENTORY_BACKUP_DIR", ""),
 		BackupKeep: envInt("INVENTORY_BACKUP_KEEP", defaultBackupKeep),
 	}
 
 	switch c.DefaultRole {
-	case string(models.RoleAdmin), string(models.RoleManager), string(models.RoleViewer):
+	case string(models.RoleManager), string(models.RoleViewer):
+	case string(models.RoleAdmin):
+		// 开放注册 + 默认管理员 = 任何人自助拿到最高权限。这是配置陷阱，
+		// 宁可启动失败也不要静默放行；确实需要时请注册后再由管理员提权。
+		return nil, fmt.Errorf(
+			"INVENTORY_DEFAULT_ROLE 不能是 admin：自助注册者会直接获得管理员权限。" +
+				"请改为 viewer / manager，或关闭自助注册（INVENTORY_ALLOW_REGISTRATION=false）")
 	default:
-		return nil, fmt.Errorf("INVENTORY_DEFAULT_ROLE 取值不合法：%q（可选 viewer / manager / admin）", c.DefaultRole)
+		return nil, fmt.Errorf("INVENTORY_DEFAULT_ROLE 取值不合法：%q（可选 viewer / manager）", c.DefaultRole)
 	}
+
+	proxies, err := utils.ParseTrustedProxies(env("INVENTORY_TRUSTED_PROXIES", defaultTrustedProxies))
+	if err != nil {
+		return nil, fmt.Errorf("INVENTORY_TRUSTED_PROXIES 解析失败：%w", err)
+	}
+	c.TrustedProxies = proxies
 
 	c.DBPath = env("INVENTORY_DB_PATH", filepath.Join(c.DataDir, "inventory.db"))
 	c.BackupDir = resolveBackupDir(c.BackupDir, c.DataDir)

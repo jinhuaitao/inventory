@@ -64,6 +64,14 @@ type MovementInput struct {
 	Note       string
 }
 
+// MaxQuantity 是单个商品允许的库存 / 单据数量上限。
+//
+// 有两个作用：一是挡住误输入（多按几个 0），二是保证
+// `before_qty + delta` 不会溢出 int64 —— 一旦溢出，after_qty 会变成
+// 负数，库存流水与商品实际库存就对不上了，追溯能力被破坏。
+// 因此所有写数量的入口（出入库、盘点、商品期初库存）都必须走同一个上限。
+const MaxQuantity = 100_000_000
+
 // ApplyMovement 在一个事务中完成「校验 → 更新库存 → 写入流水」。
 //
 // 该方法是全部库存变动的唯一入口，保证商品库存与流水永远一致。
@@ -80,8 +88,8 @@ func (s *Store) ApplyMovement(ctx context.Context, typ models.MovementType, in M
 	if in.Quantity <= 0 {
 		return nil, fmt.Errorf("%w：数量必须大于 0", ErrInvalidInput)
 	}
-	if in.Quantity > 100_000_000 {
-		return nil, fmt.Errorf("%w：单次数量过大", ErrInvalidInput)
+	if in.Quantity > MaxQuantity {
+		return nil, fmt.Errorf("%w：单次数量不能超过 %d", ErrInvalidInput, MaxQuantity)
 	}
 	if in.UnitPrice < 0 {
 		return nil, fmt.Errorf("%w：单价不能为负数", ErrInvalidInput)
@@ -162,6 +170,9 @@ func (s *Store) AdjustStock(ctx context.Context, productID int64, targetQty int,
 	}
 	if targetQty < 0 {
 		return nil, fmt.Errorf("%w：实际库存不能为负数", ErrInvalidInput)
+	}
+	if targetQty > MaxQuantity {
+		return nil, fmt.Errorf("%w：实际库存不能超过 %d", ErrInvalidInput, MaxQuantity)
 	}
 	if operatorID <= 0 {
 		return nil, fmt.Errorf("%w：缺少操作人信息", ErrInvalidInput)

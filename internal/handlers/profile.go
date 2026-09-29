@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"net/http"
+	"strings"
 
 	"inventory/internal/auth"
 	"inventory/internal/services"
@@ -51,6 +52,14 @@ func (h *Handler) ProfilePage(w http.ResponseWriter, r *http.Request) {
 }
 
 // ProfileUpdate 更新当前用户的资料。
+//
+// 姓名可以随意改；**邮箱不行** —— 它是账号的唯一标识与找回密码的通道，
+// 属于敏感的身份变更，必须做一次「再验证」（要求重新输入当前密码）。
+//
+// 否则只要会话被窃取（XSS、未锁屏的设备、被复制走的 cookie），
+// 攻击者改掉邮箱就等于把找回通道指向自己，随后完成账号接管 ——
+// 而受害者连一条通知都收不到。站内「修改安全问题」已经有这个要求，
+// 改邮箱的敏感度相当，不应例外。
 func (h *Handler) ProfileUpdate(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		h.serverError(w, r, err)
@@ -60,6 +69,7 @@ func (h *Handler) ProfileUpdate(w http.ResponseWriter, r *http.Request) {
 	user := h.currentUser(r)
 	fullName := formString(r, "full_name")
 	email := formString(r, "email")
+	current := r.FormValue("current_password")
 
 	values := map[string]string{"full_name": fullName, "email": email}
 	errs := map[string]string{}
@@ -67,7 +77,22 @@ func (h *Handler) ProfileUpdate(w http.ResponseWriter, r *http.Request) {
 		errs["email"] = "请输入有效的邮箱地址"
 	}
 
+	// 只有邮箱确实发生变化时才要求密码 —— 避免改个姓名也要输密码的无谓摩擦。
+	emailChanged := !strings.EqualFold(strings.TrimSpace(email), strings.TrimSpace(user.Email))
+	if emailChanged && current == "" {
+		errs["current_password"] = "修改邮箱需要输入当前密码"
+	}
+
 	if len(errs) > 0 {
+		h.render(w, r, http.StatusUnprocessableEntity, "profile.html", "个人资料", "profile",
+			h.profileData(r, values, errs))
+		return
+	}
+
+	// bcrypt 校验放在最后：先做完廉价的格式检查，避免无意义的计算开销。
+	if emailChanged && !services.VerifyPassword(user.PasswordHash, current) {
+		h.logger.Warn("修改邮箱时当前密码校验失败", "用户", user.Username)
+		errs["current_password"] = "当前密码不正确"
 		h.render(w, r, http.StatusUnprocessableEntity, "profile.html", "个人资料", "profile",
 			h.profileData(r, values, errs))
 		return
@@ -84,6 +109,9 @@ func (h *Handler) ProfileUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if emailChanged {
+		h.logger.Info("用户修改了邮箱", "用户", user.Username, "新邮箱", email)
+	}
 	h.redirectWith(w, r, "/profile", "success", "个人资料已更新")
 }
 

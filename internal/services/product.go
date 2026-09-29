@@ -281,6 +281,9 @@ func (in *ProductInput) normalize() error {
 	if in.Quantity < 0 {
 		return fmt.Errorf("%w：库存数量不能为负数", ErrInvalidInput)
 	}
+	if in.Quantity > MaxQuantity {
+		return fmt.Errorf("%w：期初库存不能超过 %d", ErrInvalidInput, MaxQuantity)
+	}
 	if in.Status != models.ProductStatusActive && in.Status != models.ProductStatusArchived {
 		return fmt.Errorf("%w：商品状态不合法", ErrInvalidInput)
 	}
@@ -359,7 +362,11 @@ func (s *Store) UpdateProduct(ctx context.Context, id int64, in ProductInput) er
 		}
 		return fmt.Errorf("更新商品失败: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := rowsAffected(res)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrNotFound
 	}
 	return nil
@@ -375,7 +382,11 @@ func (s *Store) SetProductStatus(ctx context.Context, id int64, status string) e
 	if err != nil {
 		return fmt.Errorf("更新商品状态失败: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := rowsAffected(res)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrNotFound
 	}
 	return nil
@@ -396,7 +407,11 @@ func (s *Store) DeleteProduct(ctx context.Context, id int64) error {
 	if err != nil {
 		return fmt.Errorf("删除商品失败: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := rowsAffected(res)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrNotFound
 	}
 	return nil

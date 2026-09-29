@@ -359,7 +359,10 @@ func TestPurgeDemoDataKeepsReferencedMasterData(t *testing.T) {
 }
 
 // TestPurgeDemoDataLegacyRowsWithoutFlag 覆盖「加 is_demo 标记之前写入的旧库」：
-// 标记全为 0，仍应能按内置 SKU 与名称清理干净。
+// 标记全为 0，显式开启 LegacySKUMatch 后仍应能按内置 SKU 与名称清理干净。
+//
+// 注意这里必须显式传 LegacySKUMatch —— 按 SKU 兜底删除默认是**关闭**的，
+// 见 TestPurgeDemoDataKeepsUserProductWithDemoSKU。
 func TestPurgeDemoDataLegacyRowsWithoutFlag(t *testing.T) {
 	db, ctx := newTestDB(t)
 	seedWithDemo(t, db, ctx)
@@ -371,7 +374,7 @@ func TestPurgeDemoDataLegacyRowsWithoutFlag(t *testing.T) {
 		}
 	}
 
-	res, err := PurgeDemoData(ctx, db, PurgeOptions{}, testLogger())
+	res, err := PurgeDemoData(ctx, db, PurgeOptions{LegacySKUMatch: true}, testLogger())
 	if err != nil {
 		t.Fatalf("清理失败: %v", err)
 	}
@@ -383,6 +386,98 @@ func TestPurgeDemoDataLegacyRowsWithoutFlag(t *testing.T) {
 	}
 	if got := countRows(t, db, ctx, "products"); got != 0 {
 		t.Errorf("清理后仍有 %d 个商品", got)
+	}
+}
+
+// TestPurgeDemoDataKeepsUserProductWithDemoSKU 是本文件里最重要的一条安全断言。
+//
+// 场景：用户清理掉演示数据后，自己建了一个商品、沿用了内置演示编号 SKU-1001。
+// 此时若清理逻辑无条件按 SKU 匹配，用户这个商品**及其全部库存流水**都会被删掉 ——
+// 一条维护命令造成不可逆的业务数据丢失，而且用户完全不知道为什么数据没了。
+//
+// 修复后默认只认 is_demo 标记；SKU 命中的项只被报告（LegacySKUOnly），不动数据。
+func TestPurgeDemoDataKeepsUserProductWithDemoSKU(t *testing.T) {
+	db, ctx := newTestDB(t)
+
+	// 先播种演示数据再清掉，模拟「用户已经清理过一次」的状态。
+	seedWithDemo(t, db, ctx)
+	if _, err := PurgeDemoData(ctx, db, PurgeOptions{}, testLogger()); err != nil {
+		t.Fatalf("首次清理失败: %v", err)
+	}
+	if got := countRows(t, db, ctx, "products"); got != 0 {
+		t.Fatalf("首次清理后应无商品，实际 %d", got)
+	}
+
+	// 用户自建商品，SKU 恰好与内置演示编号相同，is_demo = 0。
+	demoSKU := demoProducts[0].sku
+	now := "2026-01-01 00:00:00"
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO products
+			(sku, name, barcode, unit, cost_price, sale_price,
+			 quantity, safety_stock, location, description, status, `+demoFlagColumn+`, created_at, updated_at)
+		VALUES (?, '我自己建的商品', '', '件', 10, 20, 7, 0, '', '', 'active', 0, ?, ?)`,
+		demoSKU, now, now); err != nil {
+		t.Fatalf("写入用户商品失败: %v", err)
+	}
+
+	// 给这个商品挂一条真实业务流水，用来验证「流水也没被删」。
+	var userProductID int64
+	if err := db.QueryRowContext(ctx, `SELECT id FROM products WHERE sku = ?`, demoSKU).
+		Scan(&userProductID); err != nil {
+		t.Fatalf("查询用户商品失败: %v", err)
+	}
+	var operatorID int64
+	if err := db.QueryRowContext(ctx, `INSERT INTO users
+		(username, email, password_hash, full_name, role, status, created_at, updated_at)
+		VALUES ('u1','u1@example.com','x','', 'admin','active',?,?) RETURNING id`,
+		now, now).Scan(&operatorID); err != nil {
+		t.Fatalf("写入用户失败: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO stock_movements
+			(product_id, type, quantity, before_qty, after_qty, delta, unit_price, operator_id, note, created_at)
+		VALUES (?, 'in', 7, 0, 7, 7, 10, ?, '用户自己的入库', ?)`,
+		userProductID, operatorID, now); err != nil {
+		t.Fatalf("写入流水失败: %v", err)
+	}
+
+	// ---- 默认清理：必须完全不动用户的商品与流水 ----
+	res, err := PurgeDemoData(ctx, db, PurgeOptions{}, testLogger())
+	if err != nil {
+		t.Fatalf("清理失败: %v", err)
+	}
+	if res.Products != 0 {
+		t.Errorf("默认清理不应删除任何商品，实际删除 %d 个", res.Products)
+	}
+	if res.Movements != 0 {
+		t.Errorf("默认清理不应删除任何流水，实际删除 %d 条", res.Movements)
+	}
+	if got := countRows(t, db, ctx, "products"); got != 1 {
+		t.Errorf("用户的商品被误删了：清理后商品数 = %d，期望 1", got)
+	}
+	if got := countRows(t, db, ctx, "stock_movements"); got != 1 {
+		t.Errorf("用户的库存流水被误删了：清理后流水数 = %d，期望 1", got)
+	}
+
+	// 但必须把它报告出来，让管理员有机会判断。
+	if !res.HasLegacyCandidates() {
+		t.Error("SKU 命中但无标记的商品应出现在 LegacySKUOnly 中以便人工确认")
+	}
+	if len(res.LegacySKUOnly) != 1 || res.LegacySKUOnly[0] != demoSKU {
+		t.Errorf("LegacySKUOnly = %v，期望 [%s]", res.LegacySKUOnly, demoSKU)
+	}
+
+	// ---- 显式开启兜底：这时才允许删除 ----
+	// 用 dry-run 验证统计口径，避免真的把数据删掉。
+	dry, err := PurgeDemoData(ctx, db, PurgeOptions{DryRun: true, LegacySKUMatch: true}, testLogger())
+	if err != nil {
+		t.Fatalf("dry-run 清理失败: %v", err)
+	}
+	if dry.Products != 1 {
+		t.Errorf("开启 LegacySKUMatch 后应统计到 1 个商品，实际 %d", dry.Products)
+	}
+	if got := countRows(t, db, ctx, "products"); got != 1 {
+		t.Errorf("dry-run 不应改动数据，实际商品数 %d", got)
 	}
 }
 

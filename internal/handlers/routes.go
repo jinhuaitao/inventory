@@ -40,7 +40,7 @@ func (h *Handler) Routes() http.Handler {
 
 	return middleware.Chain(root,
 		middleware.Recoverer(h.logger),
-		middleware.Logger(h.logger),
+		middleware.Logger(h.logger, h.cfg.TrustedProxies),
 		middleware.SecurityHeaders(h.cfg),
 		h.mw.Authenticate,
 		h.mw.CSRF,

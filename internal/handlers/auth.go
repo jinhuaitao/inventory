@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -52,15 +53,25 @@ func (h *Handler) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	ip := utils.ClientIP(r)
+	ip := utils.ClientIP(r, h.cfg.TrustedProxies)
 
 	// 失败次数限制，抵御暴力破解
 	since := time.Now().Add(-h.cfg.LockoutWindow)
-	if n, err := h.store.CountFailedAttempts(ctx, identifier, since); err == nil && n >= h.cfg.MaxLoginAttempts {
-		_ = h.store.RecordLoginAttempt(ctx, identifier, ip, false)
+	locked, err := h.loginLocked(ctx, identifier, ip, since)
+	if err != nil {
+		h.serverError(w, r, err)
+		return
+	}
+	if locked {
+		// 只留痕、不计入失败次数：否则攻击者持续发请求即可让锁定窗口
+		// 无限顺延，把别人的账号永久锁死。
+		if err := h.store.RecordBlockedLoginAttempt(ctx, identifier, ip); err != nil {
+			h.logger.Warn("记录被限流的登录尝试失败", "错误", err)
+		}
+		h.logger.Warn("登录已被限流", "标识", identifier, "IP", ip)
 		minutes := int(h.cfg.LockoutWindow.Minutes())
 		h.renderLogin(w, r, http.StatusTooManyRequests, values, map[string]string{
-			"form": fmt.Sprintf("登录失败次数过多，账号已被临时锁定，请 %d 分钟后再试", minutes),
+			"form": fmt.Sprintf("登录尝试过于频繁，请 %d 分钟后再试", minutes),
 		}, next)
 		return
 	}
@@ -103,6 +114,75 @@ func (h *Handler) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 		target = next
 	}
 	h.redirectWith(w, r, target, "success", "欢迎回来，"+user.DisplayName()+"！")
+}
+
+// identifierLockoutMultiplier 是「不限来源、仅按标识」这一兜底维度的阈值倍数。
+//
+// 单看某个标识的失败总数就锁定，是最容易被滥用的一种实现：攻击者无需任何
+// 凭据，只要知道受害者的用户名，每 15 分钟发 5 次错误密码就能让对方永远
+// 登不进来。因此这里把它降级为**兜底**，阈值放大到主力维度的 10 倍，
+// 专门用来对付「大量 IP 各试几次」的分布式爆破 —— 那种攻击下单个 IP
+// 的计数永远达不到阈值，只有跨来源的总数才会触发。
+const identifierLockoutMultiplier = 10
+
+// loginLocked 判断当前登录请求是否应当被限流。
+//
+// 采用两个维度叠加，各自解决不同的问题：
+//
+//	维度一（标识 + 来源 IP，阈值 MaxLoginAttempts）
+//	  主力防线。把限流收敛到具体攻击来源：单个 IP 打满额度只会锁住它自己，
+//	  从别处正常登录的账号主人不受影响 —— 这正是「定向锁死他人账号」的解法。
+//
+//	维度二（仅标识，阈值 MaxLoginAttempts × identifierLockoutMultiplier）
+//	  兜底防线。用于对抗分布式爆破：攻击者换 IP 可以绕开维度一，
+//	  但所有来源的失败会累加到同一个标识上，最终仍会被拦住。
+func (h *Handler) loginLocked(ctx context.Context, identifier, ip string, since time.Time) (bool, error) {
+	n, err := h.store.CountFailedAttemptsByIdentifierAndIP(ctx, identifier, ip, since)
+	if err != nil {
+		return false, err
+	}
+	if n >= h.cfg.MaxLoginAttempts {
+		return true, nil
+	}
+
+	total, err := h.store.CountFailedAttempts(ctx, identifier, since)
+	if err != nil {
+		return false, err
+	}
+	return total >= h.cfg.MaxLoginAttempts*identifierLockoutMultiplier, nil
+}
+
+// recoveryIdentifierLocked 判断「找回密码第一步（按标识查询）」是否应限流。
+// 维度与登录一致：来源优先，跨来源总量兜底。
+func (h *Handler) recoveryIdentifierLocked(ctx context.Context, identifier, ip string, since time.Time) (bool, error) {
+	n, err := h.store.CountFailedRecoveryByIdentifierAndIP(ctx, identifier, ip, since)
+	if err != nil {
+		return false, err
+	}
+	if n >= h.cfg.MaxLoginAttempts {
+		return true, nil
+	}
+	total, err := h.store.CountFailedRecoveryByIdentifier(ctx, identifier, since)
+	if err != nil {
+		return false, err
+	}
+	return total >= h.cfg.MaxLoginAttempts*identifierLockoutMultiplier, nil
+}
+
+// recoveryAnswerLocked 判断「找回密码第二步（校验安全问题答案）」是否应限流。
+func (h *Handler) recoveryAnswerLocked(ctx context.Context, userID int64, ip string, since time.Time) (bool, error) {
+	n, err := h.store.CountFailedRecoveryByUserAndIP(ctx, userID, ip, since)
+	if err != nil {
+		return false, err
+	}
+	if n >= h.cfg.MaxLoginAttempts {
+		return true, nil
+	}
+	total, err := h.store.CountFailedRecovery(ctx, userID, since)
+	if err != nil {
+		return false, err
+	}
+	return total >= h.cfg.MaxLoginAttempts*identifierLockoutMultiplier, nil
 }
 
 func (h *Handler) renderLogin(w http.ResponseWriter, r *http.Request, status int, values, errs map[string]string, next string) {
@@ -342,13 +422,21 @@ func (h *Handler) ForgotPasswordSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	ip := utils.ClientIP(r)
+	ip := utils.ClientIP(r, h.cfg.TrustedProxies)
 
-	// 对同一标识的失败尝试做限制，避免被用来批量探测账号
+	// 对同一标识的失败尝试做限制，避免被用来批量探测账号。
+	//
+	// 与登录同理，主力维度是「标识 + 来源 IP」：否则攻击者只要知道受害者的
+	// 用户名，发几次不存在的账号名就能把对方锁在自助找回之外。
 	since := time.Now().Add(-h.cfg.LockoutWindow)
-	if n, err := h.store.CountFailedRecoveryByIdentifier(ctx, identifier, since); err == nil &&
-		n >= h.cfg.MaxLoginAttempts {
-		_ = h.store.RecordRecoveryAttempt(ctx, 0, identifier, ip, false)
+	if locked, err := h.recoveryIdentifierLocked(ctx, identifier, ip, since); err != nil {
+		h.serverError(w, r, err)
+		return
+	} else if locked {
+		// 只留痕、不计入失败次数，否则锁定会被持续刷新而永不过期。
+		if err := h.store.RecordBlockedRecoveryAttempt(ctx, 0, identifier, ip); err != nil {
+			h.logger.Warn("记录被限流的找回密码尝试失败", "错误", err)
+		}
 		h.renderForgotStep1(w, r, http.StatusTooManyRequests, values, map[string]string{
 			"form": fmt.Sprintf("尝试次数过多，请 %d 分钟后再试", int(h.cfg.LockoutWindow.Minutes())),
 		})
@@ -404,7 +492,7 @@ func (h *Handler) ForgotPasswordReset(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	ip := utils.ClientIP(r)
+	ip := utils.ClientIP(r, h.cfg.TrustedProxies)
 
 	user, err := h.store.GetUserByIdentifier(ctx, identifier)
 	if err != nil || user == nil || !user.IsActive() {
@@ -443,10 +531,17 @@ func (h *Handler) ForgotPasswordReset(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 答题失败次数限制
+	// 答题失败次数限制。同样以「账号 + 来源 IP」为主力维度：
+	// 只按账号计数的话，攻击者乱填几个答案就能把受害者锁在自助找回之外。
 	since := time.Now().Add(-h.cfg.LockoutWindow)
-	if n, err := h.store.CountFailedRecovery(ctx, user.ID, since); err == nil && n >= h.cfg.MaxLoginAttempts {
-		_ = h.store.RecordRecoveryAttempt(ctx, user.ID, identifier, ip, false)
+	if locked, err := h.recoveryAnswerLocked(ctx, user.ID, ip, since); err != nil {
+		h.serverError(w, r, err)
+		return
+	} else if locked {
+		// 同上：被限流的请求只留痕，不刷新锁定窗口。
+		if err := h.store.RecordBlockedRecoveryAttempt(ctx, user.ID, identifier, ip); err != nil {
+			h.logger.Warn("记录被限流的找回密码尝试失败", "错误", err)
+		}
 		errs["form"] = fmt.Sprintf("答案错误次数过多，请 %d 分钟后再试", int(h.cfg.LockoutWindow.Minutes()))
 		h.renderForgotStep2(w, r, http.StatusTooManyRequests, identifier, user.Username, questions,
 			map[string]string{}, errs, strength, strengthText)
@@ -472,13 +567,22 @@ func (h *Handler) ForgotPasswordReset(w http.ResponseWriter, r *http.Request) {
 
 	if !ok {
 		_ = h.store.RecordRecoveryAttempt(ctx, user.ID, identifier, ip, false)
+
+		// 剩余次数取两个维度中更小的那个 —— 实际拦住用户的是先触发的那个，
+		// 只按其中一个算会给出偏乐观的数字。
 		remaining := h.cfg.MaxLoginAttempts
-		if n, err := h.store.CountFailedRecovery(ctx, user.ID, since); err == nil {
+		if n, err := h.store.CountFailedRecoveryByUserAndIP(ctx, user.ID, ip, since); err == nil {
 			remaining = h.cfg.MaxLoginAttempts - n
-			if remaining < 0 {
-				remaining = 0
+		}
+		if total, err := h.store.CountFailedRecovery(ctx, user.ID, since); err == nil {
+			if r := h.cfg.MaxLoginAttempts*identifierLockoutMultiplier - total; r < remaining {
+				remaining = r
 			}
 		}
+		if remaining < 0 {
+			remaining = 0
+		}
+
 		h.logger.Warn("安全问题答案错误", "用户", user.Username, "IP", ip, "剩余次数", remaining)
 		h.renderForgotStep2(w, r, http.StatusUnauthorized, identifier, user.Username, questions,
 			map[string]string{},

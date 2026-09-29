@@ -91,6 +91,16 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 			return err
 		}
 	}
+
+	// 旧库同样没有 blocked 列。缺了它，被限流的请求会被当成普通失败计入，
+	// 于是攻击者持续发请求就能让锁定窗口无限顺延 —— 账号被永久锁死。
+	// 补列后默认值 0，历史数据行为不变。
+	for _, table := range []string{"login_attempts", "recovery_attempts"} {
+		ddl := "ALTER TABLE " + table + " ADD COLUMN blocked INTEGER NOT NULL DEFAULT 0"
+		if err := ensureColumn(ctx, db, table, "blocked", ddl); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
@@ -269,6 +279,22 @@ func demoSupplierNames() []string {
 	return out
 }
 
+// demoOperatorID 选一个可用于演示流水的账号，优先管理员。
+// 返回 0 表示库中没有任何用户（正常不会发生：seedAdmin 会先建管理员），
+// 此时调用方应跳过写流水，而不是让外键约束把整个启动流程打挂。
+func demoOperatorID(ctx context.Context, tx *sql.Tx) (int64, error) {
+	var id int64
+	err := tx.QueryRowContext(ctx,
+		`SELECT id FROM users ORDER BY (role = 'admin') DESC, id ASC LIMIT 1`).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("查询演示数据操作人失败: %w", err)
+	}
+	return id, nil
+}
+
 // seedDemoData 仅在数据库为空时写入一组演示数据，便于首次体验。
 // 所有写入的行都会打上 is_demo 标记，方便日后用 PurgeDemoData 精确清理。
 func seedDemoData(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
@@ -287,6 +313,14 @@ func seedDemoData(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 	defer tx.Rollback()
 
 	now := time.Now().UTC()
+
+	// 演示流水的操作人必须指向一个真实存在的账号：stock_movements.operator_id
+	// 带外键约束，若写死 id=1，一旦「用户表非空但 id=1 已被删除」（清理演示
+	// 数据后该用户即可被删），整个 Seed 会失败并让服务**无法启动**。
+	operatorID, err := demoOperatorID(ctx, tx)
+	if err != nil {
+		return err
+	}
 
 	// 分类
 	catIDs := make([]int64, 0, len(demoCategories))
@@ -331,13 +365,13 @@ func seedDemoData(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 		pid, _ := res.LastInsertId()
 
 		// 为期初库存生成一条流水
-		if p.qty > 0 {
+		if p.qty > 0 && operatorID > 0 {
 			if _, err := tx.ExecContext(ctx, `
 				INSERT INTO stock_movements
 					(product_id, type, quantity, delta, unit_price, before_qty, after_qty,
 					 ref_no, supplier_id, operator_id, note, created_at)
-				VALUES (?, 'init', ?, ?, ?, 0, ?, '', ?, 1, '系统演示数据期初建账', ?)`,
-				pid, p.qty, p.qty, p.cost, p.qty, supIDs[p.supIdx], now); err != nil {
+				VALUES (?, 'init', ?, ?, ?, 0, ?, '', ?, ?, '系统演示数据期初建账', ?)`,
+				pid, p.qty, p.qty, p.cost, p.qty, supIDs[p.supIdx], operatorID, now); err != nil {
 				return fmt.Errorf("写入演示流水失败: %w", err)
 			}
 		}
@@ -366,6 +400,17 @@ func seedDemoData(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
 type PurgeOptions struct {
 	// DryRun 为真时只统计将被删除的数据，不产生任何实际改动。
 	DryRun bool
+
+	// LegacySKUMatch 为真时，额外把「SKU 命中内置演示 SKU 但没有 is_demo 标记」
+	// 的商品也视为演示数据一并删除 —— 用于兼容加标记之前写入的旧库。
+	//
+	// ⚠️ 默认关闭，且**不应该**默认打开：SKU 是用户可自由填写的业务字段，
+	// 用户完全可能在自己的商品上用 SKU-1001 这样的编号。旧版兼容逻辑若无条件
+	// 按 SKU 删除，会连带删掉用户的商品**及其全部库存流水** ——
+	// 一条清理命令造成不可逆的业务数据丢失。
+	// 因此默认只认 is_demo 标记，SKU 命中项仅通过 PurgeResult.LegacySKUOnly
+	// 报告出来，由管理员确认后再显式开启本选项。
+	LegacySKUMatch bool
 }
 
 // PurgeResult 汇总一次清理的结果。
@@ -378,6 +423,13 @@ type PurgeResult struct {
 	// 因仍被非演示商品引用而保留下来的名称，避免误删正在使用的数据。
 	SkippedCategories []string
 	SkippedSuppliers  []string
+
+	// LegacySKUOnly 是「SKU 命中内置演示 SKU，但没有 is_demo 标记」的商品 SKU。
+	//
+	// 它们**没有被删除**（除非显式开启 LegacySKUMatch），只是报告出来：
+	// 管理员据此判断这究竟是旧版遗留的演示数据，还是用户自己创建的商品，
+	// 再决定是否加 --purge-legacy-demo 重跑。
+	LegacySKUOnly []string
 }
 
 // Empty 判断本次清理是否没有改动任何数据。
@@ -385,10 +437,15 @@ func (r *PurgeResult) Empty() bool {
 	return r.Products == 0 && r.Movements == 0 && r.Categories == 0 && r.Suppliers == 0
 }
 
+// HasLegacyCandidates 判断是否存在「疑似旧版演示商品」需要人工确认。
+func (r *PurgeResult) HasLegacyCandidates() bool {
+	return len(r.LegacySKUOnly) > 0
+}
+
 // PurgeDemoData 删除内置演示数据。
 //
 // 判定规则（宁可漏删也不误删）：
-//   - products   : is_demo=1，或 SKU 命中内置演示 SKU（兼容加标记之前写入的旧库）
+//   - products   : is_demo=1；仅在 opts.LegacySKUMatch 为真时才额外按 SKU 命中
 //   - stock_movements : 仅删除挂在上述商品下的流水
 //   - categories / suppliers : is_demo=1 或名称命中内置演示清单，**且已无商品引用**
 //
@@ -407,9 +464,23 @@ func PurgeDemoData(ctx context.Context, db *sql.DB, opts PurgeOptions, logger *s
 	for _, p := range demoProducts {
 		skuArgs = append(skuArgs, p.sku)
 	}
-	productWhere := fmt.Sprintf("%s = 1 OR sku IN (%s)", demoFlagColumn, placeholders(len(skuArgs)))
+	skuIn := "sku IN (" + placeholders(len(skuArgs)) + ")"
 
-	productIDs, err := selectIDs(ctx, tx, `SELECT id FROM products WHERE `+productWhere, skuArgs...)
+	// 先单独找出「SKU 命中但无 is_demo 标记」的商品并报告，不删。
+	if res.LegacySKUOnly, err = selectStrings(ctx, tx,
+		`SELECT sku FROM products WHERE `+demoFlagColumn+` <> 1 AND `+skuIn, skuArgs...); err != nil {
+		return nil, err
+	}
+
+	var productIDs []int64
+	if opts.LegacySKUMatch {
+		productIDs, err = selectIDs(ctx, tx,
+			`SELECT id FROM products WHERE `+demoFlagColumn+` = 1 OR `+skuIn, skuArgs...)
+	} else {
+		// 只认标记：这条查询不带占位符，因此不能传 skuArgs。
+		productIDs, err = selectIDs(ctx, tx,
+			`SELECT id FROM products WHERE `+demoFlagColumn+` = 1`)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -514,6 +585,28 @@ func selectIDs(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]in
 		return nil, fmt.Errorf("遍历待清理记录失败: %w", err)
 	}
 	return ids, nil
+}
+
+// selectStrings 执行只返回单列文本的查询。
+func selectStrings(ctx context.Context, tx *sql.Tx, query string, args ...any) ([]string, error) {
+	rows, err := tx.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("查询待清理记录失败: %w", err)
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("读取待清理记录失败: %w", err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("遍历待清理记录失败: %w", err)
+	}
+	return out, nil
 }
 
 // deleteRows 执行删除语句并返回受影响行数。

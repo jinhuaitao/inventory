@@ -59,6 +59,10 @@ CREATE TABLE IF NOT EXISTS recovery_attempts (
     identifier TEXT    NOT NULL DEFAULT '',
     ip         TEXT    NOT NULL DEFAULT '',
     success    INTEGER NOT NULL DEFAULT 0,
+    -- blocked = 1 表示这次尝试是在「已被限流」状态下发生的，仅作审计留痕。
+    -- 它**不参与**失败计数：否则攻击者只要持续发请求，就能不断刷新计数窗口，
+    -- 让锁定永远不过期（自我延长的死锁）。
+    blocked    INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL
 );
 
@@ -71,10 +75,13 @@ CREATE TABLE IF NOT EXISTS login_attempts (
     identifier TEXT    NOT NULL,
     ip         TEXT    NOT NULL DEFAULT '',
     success    INTEGER NOT NULL DEFAULT 0,
+    -- 同 recovery_attempts.blocked：被限流的请求只留痕，不计入失败次数
+    blocked    INTEGER NOT NULL DEFAULT 0,
     created_at DATETIME NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_login_attempts ON login_attempts(identifier, created_at);
+CREATE INDEX IF NOT EXISTS idx_login_attempts    ON login_attempts(identifier, created_at);
+CREATE INDEX IF NOT EXISTS idx_login_attempts_ip ON login_attempts(ip, created_at);
 
 -- ---------------------------------------------------------------------------
 -- 主数据

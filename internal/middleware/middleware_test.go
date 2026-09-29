@@ -72,20 +72,50 @@ func multipartBody(t *testing.T, csrfToken, fileField, filename, payload string)
 	return &buf, mw.FormDataContentType()
 }
 
-// doMultipart 发一个带 CSRF cookie 的 multipart 请求，返回响应记录器。
-func doMultipart(t *testing.T, chain http.Handler, token, csrfToken, fileField, payload string) *httptest.ResponseRecorder {
+// doMultipart 发一个 multipart 请求，返回响应记录器。
+//
+// sessionToken 非空时，先往上下文注入一个已登录会话（其 CSRF 令牌即该值），
+// 模拟真实的「管理员在数据维护页提交恢复」链路；为空则表示未登录请求。
+//
+// ⚠️ 必须显式区分这两种情形：CSRF 中间件对未登录的 multipart 请求会直接
+// 拒绝（见 TestCSRFRejectsUnauthenticatedMultipartBeforeParsing），
+// 若不注入会话，下面所有用例都会因为「未登录」被拦下，
+// 从而**永远测不到令牌比对逻辑本身**。
+func doMultipart(t *testing.T, chain http.Handler, sessionToken, csrfToken, fileField, payload string) *httptest.ResponseRecorder {
 	t.Helper()
 
 	body, contentType := multipartBody(t, csrfToken, fileField, "inventory.db", payload)
 	req := httptest.NewRequest(http.MethodPost, "/admin/maintenance/restore", body)
 	req.Header.Set("Content-Type", contentType)
-	if token != "" {
-		req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: token})
+	if csrfToken != "" {
+		req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: csrfToken})
+	}
+	if sessionToken != "" {
+		req = req.WithContext(auth.WithSession(req.Context(),
+			&models.Session{CSRFToken: sessionToken}))
 	}
 
 	rec := httptest.NewRecorder()
 	chain.ServeHTTP(rec, req)
 	return rec
+}
+
+// countingReader 统计 body 被读取的次数与字节数。
+//
+// 用来客观证明「未登录的 multipart 请求在解析之前就被拒绝了」——
+// 光看状态码 403 是不够的，因为校验失败同样返回 403，
+// 而两者对服务端的代价天差地别（后者已经把整包数据落盘了）。
+type countingReader struct {
+	r     io.Reader
+	reads int
+	bytes int64
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	c.reads++
+	n, err := c.r.Read(p)
+	c.bytes += int64(n)
+	return n, err
 }
 
 // ---------------------------------------------------------------------------
@@ -98,6 +128,9 @@ func doMultipart(t *testing.T, chain http.Handler, token, csrfToken, fileField, 
 // application/x-www-form-urlencoded，对 multipart/form-data 完全无效 ——
 // 文件上传表单里的 _csrf 隐藏字段永远读不到，导致所有上传（包括
 // 「数据维护」页的备份恢复）恒定 403。
+//
+// 注意这里必须带**已登录会话**：站内所有 multipart 接口都要求登录，
+// 未登录的 multipart 请求会在解析前被直接拒绝（另一条独立的安全约束）。
 func TestCSRFAllowsMultipartUpload(t *testing.T) {
 	const token = "test-csrf-token"
 
@@ -151,6 +184,9 @@ func TestCSRFMultipartKeepsUploadedFile(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/admin/maintenance/restore", body)
 	req.Header.Set("Content-Type", contentType)
 	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: token})
+	// 注入已登录会话：未登录的 multipart 会在解析前被拒。
+	req = req.WithContext(auth.WithSession(req.Context(),
+		&models.Session{CSRFToken: token}))
 
 	rec := httptest.NewRecorder()
 	Chain(next, m.Authenticate, m.CSRF).ServeHTTP(rec, req)
@@ -208,6 +244,9 @@ func TestCSRFRejectsMalformedMultipart(t *testing.T) {
 	// 声明成 multipart 但 boundary 根本不存在。
 	req.Header.Set("Content-Type", "multipart/form-data; boundary=doesnotexist")
 	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: token})
+	// 注入已登录会话，确保测到的是「body 畸形」而不是「未登录」。
+	req = req.WithContext(auth.WithSession(req.Context(),
+		&models.Session{CSRFToken: token}))
 
 	rec := httptest.NewRecorder()
 	chain.ServeHTTP(rec, req)
@@ -217,6 +256,42 @@ func TestCSRFRejectsMalformedMultipart(t *testing.T) {
 	}
 	if *reached {
 		t.Fatal("畸形请求不应抵达后续 handler")
+	}
+}
+
+// TestCSRFRejectsUnauthenticatedMultipartBeforeParsing 锁定一条重要的安全约束：
+// **未登录的 multipart 请求必须在解析 body 之前就被拒绝**。
+//
+// 背景：CSRF 中间件跑在鉴权之前，而未登录的请求同样可以带 multipart body。
+// 若不做判断就交给 ParseMultipartForm，任何人都能在没有任何凭据的情况下
+// 发起一次 512MB 的上传，让服务端把整包数据落盘 —— 磁盘与 IO 直接被打满。
+// 更糟的是「CSRF 校验失败」发生在解析**之后**，也就是说校验根本拦不住这个成本。
+//
+// 因此这里不能只看状态码（两种路径都是 403），必须用计数 reader
+// 客观证明 body 一个字节都没被读过。
+func TestCSRFRejectsUnauthenticatedMultipartBeforeParsing(t *testing.T) {
+	body, contentType := multipartBody(t, "whatever", "backup", "inventory.db",
+		strings.Repeat("A", 1<<20)) // 1MB 载荷，足以在计数上留下明显痕迹
+
+	counting := &countingReader{r: body}
+	req := httptest.NewRequest(http.MethodPost, "/admin/maintenance/restore", counting)
+	req.Header.Set("Content-Type", contentType)
+	req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: "whatever"})
+	// 故意不注入会话 —— 模拟匿名攻击者。
+
+	_, reached, chain := newChain(t)
+	rec := httptest.NewRecorder()
+	chain.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("未登录的 multipart 请求应返回 403，实际 %d", rec.Code)
+	}
+	if *reached {
+		t.Fatal("未登录的 multipart 请求不应抵达后续 handler")
+	}
+	if counting.reads != 0 || counting.bytes != 0 {
+		t.Errorf("未登录的 multipart body 不应被读取，实际读取 %d 次 / %d 字节",
+			counting.reads, counting.bytes)
 	}
 }
 

@@ -90,7 +90,7 @@ func (m *SessionManager) Create(ctx context.Context, w http.ResponseWriter, r *h
 		CSRFToken: csrf,
 		ExpiresAt: expires,
 		UserAgent: utils.UserAgent(r),
-		IP:        utils.ClientIP(r),
+		IP:        utils.ClientIP(r, m.cfg.TrustedProxies),
 	}
 	if err := m.store.CreateSession(ctx, sess); err != nil {
 		return nil, err

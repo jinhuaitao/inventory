@@ -32,7 +32,17 @@ INVENTORY_ADMIN_PASSWORD=""
 #   /opt/inventory/bin/inventory-server --purge-demo-data --dry-run
 # 预览后再执行清理。
 # 也可以在 Web 界面「数据维护」页里预演并清理。
+#
+# 清理默认只删带 is_demo 标记的行。旧版（加标记之前）遗留的演示数据会被
+# 列出来但不删除，确认后加 --purge-legacy-demo 才会一并处理。
 INVENTORY_SEED_DEMO_DATA="false"
+
+# ---------- 反向代理 ----------
+# 允许采信 X-Forwarded-For / X-Real-IP 的网段（逗号分隔，支持 CIDR 或裸 IP）。
+# 默认 127.0.0.1/8,::1/128，覆盖「Nginx 与本服务同机」这一最常见部署。
+# 代理在别的机器 / 容器里时必须显式加上它的网段，否则日志里记录的会是
+# 代理自己的地址。**不要**配置成 0.0.0.0/0 —— 那等于允许任何人伪造来源 IP。
+# INVENTORY_TRUSTED_PROXIES="127.0.0.1/8,::1/128"
 
 # ---------- 数据库备份 ----------
 # 备份目录。Web 界面「数据维护」页与每日定时任务共用这一个目录。
@@ -53,8 +63,15 @@ INVENTORY_UPDATE_ENABLED="true"
 
 # ---------- 注册与角色 ----------
 INVENTORY_ALLOW_REGISTRATION="false"
+# 可选 viewer（只读）/ manager（仓管员）。
+# ⚠️ 不允许填 admin：开放注册 + 默认管理员 = 任何人自助获得最高权限，
+#    配置成 admin 会让程序拒绝启动。确实需要时请先注册再由管理员提权。
 INVENTORY_DEFAULT_ROLE="viewer"
 
 # ---------- 登录安全 ----------
+# 限流按两个维度生效：
+#   1) 同一「账号 + 来源 IP」失败 N 次  -> 锁定该来源（主力防线）
+#   2) 同一账号（不限来源）失败 N×10 次 -> 锁定整个账号（分布式爆破兜底）
+# 因此单个 IP 打满额度只会锁住它自己，不会把别人的账号锁死。
 INVENTORY_MAX_LOGIN_ATTEMPTS="5"
 INVENTORY_LOCKOUT_WINDOW="15m"

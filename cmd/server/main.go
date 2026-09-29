@@ -55,6 +55,8 @@ func run() error {
 	checkUpdate := flag.Bool("check-update", false, "检查是否有新版本后退出")
 	purgeDemo := flag.Bool("purge-demo-data", false, "删除内置演示数据（分类 / 供应商 / 商品）后退出")
 	purgeDryRun := flag.Bool("dry-run", false, "配合 --purge-demo-data：只统计将删除的数据，不做实际改动")
+	purgeLegacy := flag.Bool("purge-legacy-demo", false,
+		"配合 --purge-demo-data：额外把「SKU 命中内置演示 SKU 但无 is_demo 标记」的商品也视为演示数据（旧库兼容，请先用 --dry-run 确认）")
 	backupTo := flag.String("backup-db", "", "备份数据库到指定文件或目录后退出（服务运行中执行也安全）")
 	backupForce := flag.Bool("force", false, "配合 --backup-db：目标文件已存在时覆盖")
 	backupKeep := flag.Int("keep", 0, "配合 --backup-db 且目标是目录：只保留最新 N 份自动命名的备份，0 表示不清理")
@@ -72,12 +74,16 @@ func run() error {
 		return errors.New("--keep 需要与 --backup-db 一起使用")
 	}
 
+	if *purgeLegacy && !*purgeDemo {
+		return errors.New("--purge-legacy-demo 需要与 --purge-demo-data 一起使用")
+	}
+
 	// --purge-demo-data / --backup-db 是离线维护命令，只需要能定位数据库，
 	// 不依赖会话密钥等运行期配置，因此在 config.Load() 之前处理。
 	if *purgeDemo || *backupTo != "" {
 		sc := config.LoadStorageOnly()
 		if *purgeDemo {
-			return runPurgeDemoData(sc, newLogger(sc), *purgeDryRun)
+			return runPurgeDemoData(sc, newLogger(sc), *purgeDryRun, *purgeLegacy)
 		}
 		return runBackupDB(sc, newLogger(sc), *backupTo, *backupForce, *backupKeep)
 	}
@@ -312,7 +318,12 @@ func runUpdateCheck(cfg *config.Config, logger *slog.Logger) error {
 //
 // 演示数据只在「数据库为空」时写入，所以旧版本部署升级上来之后并不会自动消失，
 // 需要显式执行一次本命令。建议先加 --dry-run 确认将要删除的内容。
-func runPurgeDemoData(cfg *config.Config, logger *slog.Logger, dryRun bool) error {
+//
+// 默认只删带 is_demo 标记的行。SKU 命中内置演示 SKU 但**没有**标记的商品
+// 只会被报告出来（见 PurgeResult.LegacySKUOnly），不会被删 ——
+// 因为 SKU 是用户可自由填写的字段，无条件按 SKU 删除会连带清掉用户自建的商品
+// 及其全部库存流水。确认那些确实是旧版遗留数据后，再加 --purge-legacy-demo。
+func runPurgeDemoData(cfg *config.Config, logger *slog.Logger, dryRun, legacySKU bool) error {
 	if err := cfg.EnsureDirs(); err != nil {
 		return err
 	}
@@ -330,7 +341,8 @@ func runPurgeDemoData(cfg *config.Config, logger *slog.Logger, dryRun bool) erro
 		return err
 	}
 
-	res, err := database.PurgeDemoData(ctx, db, database.PurgeOptions{DryRun: dryRun}, logger)
+	res, err := database.PurgeDemoData(ctx, db,
+		database.PurgeOptions{DryRun: dryRun, LegacySKUMatch: legacySKU}, logger)
 	if err != nil {
 		return err
 	}
@@ -344,6 +356,7 @@ func runPurgeDemoData(cfg *config.Config, logger *slog.Logger, dryRun bool) erro
 
 	if res.Empty() {
 		fmt.Println("结果: 未发现内置演示数据，无需清理。")
+		reportLegacyCandidates(res, legacySKU)
 		return nil
 	}
 
@@ -360,12 +373,36 @@ func runPurgeDemoData(cfg *config.Config, logger *slog.Logger, dryRun bool) erro
 		fmt.Printf("  保留供应商（仍被商品引用）: %s\n", strings.Join(res.SkippedSuppliers, "、"))
 	}
 
+	reportLegacyCandidates(res, legacySKU)
+
 	if dryRun {
 		fmt.Println("确认无误后去掉 --dry-run 再执行一次即可完成清理。")
 	} else {
 		fmt.Println("如需回滚，请使用清理前备份的数据库文件。")
 	}
 	return nil
+}
+
+// reportLegacyCandidates 提示那些「SKU 命中但没有 is_demo 标记」的商品。
+//
+// 这批数据默认不动：它们既可能是旧版遗留的演示商品，也可能是用户自己
+// 用同样编号建的正常商品，程序无法分辨，只能交给管理员判断。
+func reportLegacyCandidates(res *database.PurgeResult, legacySKU bool) {
+	if !res.HasLegacyCandidates() {
+		return
+	}
+	fmt.Println()
+	if legacySKU {
+		fmt.Printf("  另有 %d 个 SKU 命中内置演示编号的商品已按 --purge-legacy-demo 一并处理。\n",
+			len(res.LegacySKUOnly))
+		return
+	}
+	fmt.Println("注意: 发现以下商品的 SKU 与内置演示编号相同，但**没有**演示标记，因此未被删除：")
+	for _, sku := range res.LegacySKUOnly {
+		fmt.Printf("  - %s\n", sku)
+	}
+	fmt.Println("  如果确认这些是旧版本遗留的演示数据，请加 --purge-legacy-demo 重跑；")
+	fmt.Println("  如果是您自己创建的商品，请忽略本提示（默认行为不会动它们）。")
 }
 
 // runBackupDB 处理 --backup-db：把数据库备份成一个可直接拷走的单文件。

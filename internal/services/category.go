@@ -162,7 +162,11 @@ func (s *Store) UpdateCategory(ctx context.Context, id int64, name, description 
 		}
 		return fmt.Errorf("更新分类失败: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := rowsAffected(res)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrNotFound
 	}
 	return nil
@@ -180,7 +184,11 @@ func (s *Store) DeleteCategory(ctx context.Context, id int64) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("删除分类失败: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := rowsAffected(res)
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
 		return 0, ErrNotFound
 	}
 	return affected, nil

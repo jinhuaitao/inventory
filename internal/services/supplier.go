@@ -193,7 +193,11 @@ func (s *Store) UpdateSupplier(ctx context.Context, id int64, in SupplierInput) 
 		}
 		return fmt.Errorf("更新供应商失败: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := rowsAffected(res)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
 		return ErrNotFound
 	}
 	return nil
@@ -211,7 +215,11 @@ func (s *Store) DeleteSupplier(ctx context.Context, id int64) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("删除供应商失败: %w", err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := rowsAffected(res)
+	if err != nil {
+		return 0, err
+	}
+	if n == 0 {
 		return 0, ErrNotFound
 	}
 	return affected, nil

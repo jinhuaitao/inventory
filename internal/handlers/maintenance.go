@@ -242,10 +242,11 @@ func (h *Handler) RestoreUpload(w http.ResponseWriter, r *http.Request) {
 	)
 
 	h.render(w, r, http.StatusOK, "maintenance/restoring.html", "正在恢复", "maintenance", map[string]any{
-		"Source":  header.Filename,
-		"Size":    sum.Size,
-		"Counts":  sum.Counts,
-		"Refresh": maintenancePath,
+		"Source":    header.Filename,
+		"Size":      sum.Size,
+		"Counts":    sum.Counts,
+		"Refresh":   maintenancePath,
+		"Countdown": restartCountdown(),
 	})
 
 	// 把响应推回浏览器后再替换进程映像，否则用户看不到这个页面。
@@ -299,6 +300,12 @@ func (h *Handler) PurgeDemoData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if preview.Empty() {
+		if preview.HasLegacyCandidates() {
+			h.redirectWith(w, r, maintenancePath, "info", fmt.Sprintf(
+				"未发现带演示标记的数据；另有 %d 个商品的 SKU 与内置演示编号相同但无标记，"+
+					"出于安全考虑未做删除（见页面上的说明）", len(preview.LegacySKUOnly)))
+			return
+		}
 		h.redirectWith(w, r, maintenancePath, "info", "未发现内置演示数据，无需清理")
 		return
 	}

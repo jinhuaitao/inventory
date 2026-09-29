@@ -5,6 +5,7 @@ package middleware
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"runtime/debug"
@@ -111,7 +112,7 @@ func (s *statusRecorder) Flush() {
 }
 
 // Logger 输出访问日志。
-func Logger(logger *slog.Logger) Middleware {
+func Logger(logger *slog.Logger, trusted []*net.IPNet) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// 静态资源不记录，避免噪音
@@ -133,7 +134,7 @@ func Logger(logger *slog.Logger) Middleware {
 					"路径", r.URL.Path,
 					"状态", rec.status,
 					"耗时", time.Since(start).Round(time.Millisecond).String(),
-					"IP", utils.ClientIP(r),
+					"IP", utils.ClientIP(r, trusted),
 				)
 			}
 		})
@@ -341,7 +342,8 @@ func (m *Manager) CSRF(next http.Handler) http.Handler {
 		}
 
 		expected := ""
-		if sess := auth.SessionFrom(r.Context()); sess != nil {
+		sess := auth.SessionFrom(r.Context())
+		if sess != nil {
 			expected = sess.CSRFToken
 		} else {
 			expected = CSRFFrom(r.Context())
@@ -357,6 +359,15 @@ func (m *Manager) CSRF(next http.Handler) http.Handler {
 			// multipart 的体积上限必须在解析之前套上，否则超大请求会先落满
 			// 临时目录；解析本身交给 auth.ProvidedCSRFToken。
 			if auth.IsMultipartForm(r) {
+				// ⚠️ 本中间件跑在鉴权之前，而未登录的请求也可能带 multipart body。
+				// 若不做判断就交给 ParseMultipartForm，任何人都能用一次 512MB 的
+				// 上传（无需任何凭据）让服务端把数据完整落盘 —— 磁盘与 IO 直接被
+				// 打满，而 CSRF 校验失败是发生在解析**之后**的，拦不住。
+				// 站内所有 multipart 接口都要求登录，因此这里直接拒绝。
+				if sess == nil {
+					m.csrfFail(w, r, "请先登录后再上传")
+					return
+				}
 				r.Body = http.MaxBytesReader(w, r.Body, auth.MaxUploadBytes)
 			}
 			provided = auth.ProvidedCSRFToken(r)
@@ -373,7 +384,7 @@ func (m *Manager) CSRF(next http.Handler) http.Handler {
 
 func (m *Manager) csrfFail(w http.ResponseWriter, r *http.Request, msg string) {
 	if m.logger != nil {
-		m.logger.Warn("CSRF 校验失败", "路径", r.URL.Path, "方法", r.Method, "IP", utils.ClientIP(r))
+		m.logger.Warn("CSRF 校验失败", "路径", r.URL.Path, "方法", r.Method, "IP", utils.ClientIP(r, m.cfg.TrustedProxies))
 	}
 	if utils.WantsJSON(r) {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

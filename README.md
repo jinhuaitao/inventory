@@ -1,8 +1,10 @@
 # 库存管理系统 (Inventory System)
 
-[![CI](https://github.com/jinhuaitao/inventory/actions/workflows/ci.yml/badge.svg)](https://github.com/jinhuaitao/inventory/actions/workflows/ci.yml)
-[![Go Version](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go)](https://go.dev/)
-[![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![CI](https://github.com/jinhuaitao/inventory/actions/workflows/ci.yml/badge.svg)
+
+![Go Version](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go)
+
+![License](https://img.shields.io/badge/License-MIT-blue.svg)
 
 一个用 **Go 语言** 编写的、功能完善的库存管理系统。使用 **SQLite** 存储数据、**服务端渲染 HTML** 呈现界面，编译后是**单个可执行文件**，无需任何外部依赖即可运行。
 
@@ -68,6 +70,7 @@
 ## 🚀 快速开始
 
 ### 方式一：一键安装（推荐）
+
 ```
 curl -o inventory.sh https://raw.githubusercontent.com/jinhuaitao/inventory/master/inventory.sh && chmod +x inventory.sh && ./inventory.sh
 ```
@@ -76,11 +79,11 @@ curl -o inventory.sh https://raw.githubusercontent.com/jinhuaitao/inventory/mast
 
 前往 [Releases](https://github.com/jinhuaitao/inventory/releases) 下载对应架构的**裸可执行文件**（静态链接、无 CGO，glibc 与 musl 均可直接运行）：
 
-| 平台 | 文件 |
-| --- | --- |
+| 平台           | 文件                       |
+| ------------ | ------------------------ |
 | Linux x86_64 | `inventory-server-amd64` |
-| Linux ARM64 | `inventory-server-arm64` |
-| 校验和 | `checksums.txt` |
+| Linux ARM64  | `inventory-server-arm64` |
+| 校验和          | `checksums.txt`          |
 
 ```bash
 curl -fLO https://github.com/jinhuaitao/inventory/releases/latest/download/inventory-server-amd64
@@ -114,16 +117,16 @@ go build -o inventory-server ./cmd/server
 
 浏览器打开 <http://localhost:8080>
 
-首次启动时，如果数据库为空，会自动创建默认管理员账号；**开发环境**还会额外写入一组
+首次启动时，如果数据库为空，会自动创建默认管理员账号；**开发环境**还会额外写入一组  
 演示数据（4 个分类、3 个供应商、12 个商品）方便试用：
 
-| 用户名 | 密码 |
-| --- | --- |
+| 用户名     | 密码            |
+| ------- | ------------- |
 | `admin` | `Admin@12345` |
 
 > ⚠️ **请登录后立即修改管理员密码。** 生产环境务必通过 `INVENTORY_ADMIN_PASSWORD` 指定强密码。
 
-演示数据的写入受 `INVENTORY_SEED_DEMO_DATA` 控制：**不设置时生产环境为关闭、其他环境为开启**。
+演示数据的写入受 `INVENTORY_SEED_DEMO_DATA` 控制：**不设置时生产环境为关闭、其他环境为开启**。  
 若库里已经存在演示数据，可用下面的命令清理（先预览，再执行）：
 
 ```bash
@@ -131,7 +134,13 @@ go build -o inventory-server ./cmd/server
 ./inventory-server --purge-demo-data             # 实际清理
 ```
 
-清理只针对内置演示数据，管理员账号与自建数据不受影响；仍被商品引用的分类 / 供应商会被保留并列出。
+清理默认**只删带演示标记（`is_demo=1`）的行**，管理员账号与自建数据不受影响；  
+仍被商品引用的分类 / 供应商会被保留并列出。
+
+旧版本数据库（加标记之前写入的演示数据）里的商品没有标记，命令会把它们列出来  
+但**不会删除**，需要确认后加 `--purge-legacy-demo` 才会一并处理。之所以不默认按  
+SKU 删除：SKU 是用户可以自由填写的字段，无条件按 SKU 匹配会连带删掉用户自建的  
+商品及其全部库存流水，且不可逆。
 
 ### 命令行参数
 
@@ -140,6 +149,7 @@ go build -o inventory-server ./cmd/server
 ./inventory-server --check-update                # 检查是否有新版本后退出
 ./inventory-server --purge-demo-data             # 清理内置演示数据后退出
 ./inventory-server --purge-demo-data --dry-run   # 只预览将要删除的数据
+./inventory-server --purge-demo-data --purge-legacy-demo  # 一并清理旧版遗留（无标记）演示数据
 ./inventory-server --backup-db ./backups         # 备份数据库（不用停服务）
 ./inventory-server --backup-db ./backups --keep 7  # 备份并只保留最近 7 份
 ```
@@ -152,11 +162,11 @@ go build -o inventory-server ./cmd/server
 
 注册页面会要求填写 3 组「问题 + 答案」，问题文本完全由你自己编写，例如：
 
-| # | 问题 | 答案 |
-| --- | --- | --- |
-| 1 | 我小学班主任的姓名是？ | 张老师 |
-| 2 | 我第一辆自行车的颜色是？ | 蓝色 |
-| 3 | 我母亲的出生城市是？ | 杭州 |
+| # | 问题           | 答案  |
+| - | ------------ | --- |
+| 1 | 我小学班主任的姓名是？  | 张老师 |
+| 2 | 我第一辆自行车的颜色是？ | 蓝色  |
+| 3 | 我母亲的出生城市是？   | 杭州  |
 
 答案不区分大小写，前后的空格会被自动忽略。**问题文本不能重复，答案至少 2 个字。**
 
@@ -182,57 +192,66 @@ go build -o inventory-server ./cmd/server
 
 ### 基础
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `INVENTORY_APP_NAME` | `库存管理系统` | 站点名称 |
-| `INVENTORY_ENV` | `development` | `development` / `production` |
-| `INVENTORY_ADDR` | `:8080` | 监听地址 |
-| `INVENTORY_BASE_URL` | `http://localhost:8080` | 对外访问地址 |
-| `INVENTORY_DATA_DIR` | `data` | 数据目录 |
-| `INVENTORY_DB_PATH` | `data/inventory.db` | SQLite 数据库文件路径 |
-| `INVENTORY_LOG_LEVEL` | `info` | `debug` / `info` / `warn` / `error` |
+| 变量                    | 默认值                     | 说明                                  |
+| --------------------- | ----------------------- | ----------------------------------- |
+| `INVENTORY_APP_NAME`  | `库存管理系统`                | 站点名称                                |
+| `INVENTORY_ENV`       | `development`           | `development` / `production`        |
+| `INVENTORY_ADDR`      | `:8080`                 | 监听地址                                |
+| `INVENTORY_BASE_URL`  | `http://localhost:8080` | 对外访问地址                              |
+| `INVENTORY_DATA_DIR`  | `data`                  | 数据目录                                |
+| `INVENTORY_DB_PATH`   | `data/inventory.db`     | SQLite 数据库文件路径                      |
+| `INVENTORY_LOG_LEVEL` | `info`                  | `debug` / `info` / `warn` / `error` |
 
 ### 会话与安全
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `INVENTORY_SESSION_SECRET` | 开发环境自动生成 | **生产环境必填**，至少 16 字符的随机字符串 |
-| `INVENTORY_SESSION_LIFETIME` | `12h` | 会话有效期 |
-| `INVENTORY_REMEMBER_LIFETIME` | `720h` | 「记住我」有效期 |
-| `INVENTORY_MAX_LOGIN_ATTEMPTS` | `5` | 登录失败 / 答题失败次数上限 |
-| `INVENTORY_LOCKOUT_WINDOW` | `15m` | 锁定时长 |
+| 变量                             | 默认值                   | 说明                                                          |
+| ------------------------------ | --------------------- | ----------------------------------------------------------- |
+| `INVENTORY_SESSION_SECRET`     | 开发环境自动生成              | **生产环境必填**，至少 16 字符的随机字符串                                   |
+| `INVENTORY_SESSION_LIFETIME`   | `12h`                 | 会话有效期                                                       |
+| `INVENTORY_REMEMBER_LIFETIME`  | `720h`                | 「记住我」有效期                                                    |
+| `INVENTORY_MAX_LOGIN_ATTEMPTS` | `5`                   | 同一「账号 + 来源 IP」的失败上限；同一账号跨来源的兜底上限是它的 10 倍                    |
+| `INVENTORY_LOCKOUT_WINDOW`     | `15m`                 | 失败计数的统计窗口（窗口过后自动解锁）                                         |
+| `INVENTORY_TRUSTED_PROXIES`    | `127.0.0.1/8,::1/128` | 允许采信 `X-Forwarded-For` / `X-Real-IP` 的网段，逗号分隔，支持 CIDR 与裸 IP |
+
+> ⚠️ 只有在请求**确实来自这些网段**时才会采信转发头。代理在别的机器或容器里时，  
+> 必须把它的网段加进来，否则日志与审计里记录的会是代理自己的地址。  
+> **不要**配置成 `0.0.0.0/0` —— 那等于让任何人都能用一个请求头伪造来源 IP。
 
 ### 账号策略
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `INVENTORY_ALLOW_REGISTRATION` | `true` | 是否开放自助注册 |
-| `INVENTORY_DEFAULT_ROLE` | `viewer` | 自助注册用户的默认角色（`viewer`/`manager`/`admin`） |
-| `INVENTORY_ADMIN_USERNAME` | `admin` | 初始化管理员用户名 |
-| `INVENTORY_ADMIN_EMAIL` | `admin@example.com` | 初始化管理员邮箱 |
-| `INVENTORY_ADMIN_PASSWORD` | `Admin@12345` | 初始化管理员密码 |
-| `INVENTORY_SEED_DEMO_DATA` | 随环境（生产 `false`） | 数据库为空时是否写入内置演示数据 |
+| 变量                             | 默认值                 | 说明                              |
+| ------------------------------ | ------------------- | ------------------------------- |
+| `INVENTORY_ALLOW_REGISTRATION` | `true`              | 是否开放自助注册                        |
+| `INVENTORY_DEFAULT_ROLE`       | `viewer`            | 自助注册用户的默认角色（`viewer`/`manager`） |
+| `INVENTORY_ADMIN_USERNAME`     | `admin`             | 初始化管理员用户名                       |
+| `INVENTORY_ADMIN_EMAIL`        | `admin@example.com` | 初始化管理员邮箱                        |
+| `INVENTORY_ADMIN_PASSWORD`     | `Admin@12345`       | 初始化管理员密码                        |
+| `INVENTORY_SEED_DEMO_DATA`     | 随环境（生产 `false`）     | 数据库为空时是否写入内置演示数据                |
+
+> ⚠️ `INVENTORY_DEFAULT_ROLE` **不接受 `admin`**：开放注册 + 默认管理员等于  
+> 「任何能访问注册页的人自助获得最高权限」。填成 `admin` 会让程序**拒绝启动**，  
+> 而不是静默放行。确实需要管理员时，请先注册再由管理员提权。
 
 ### 数据库备份
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `INVENTORY_BACKUP_DIR` | `<数据目录>/backups` | 备份目录；网页「数据维护」与每日定时备份共用同一目录 |
-| `INVENTORY_BACKUP_KEEP` | `14` | 自动命名备份的保留份数，`0` 表示不自动清理 |
+| 变量                      | 默认值              | 说明                         |
+| ----------------------- | ---------------- | -------------------------- |
+| `INVENTORY_BACKUP_DIR`  | `<数据目录>/backups` | 备份目录；网页「数据维护」与每日定时备份共用同一目录 |
+| `INVENTORY_BACKUP_KEEP` | `14`             | 自动命名备份的保留份数，`0` 表示不自动清理    |
 
-> `INVENTORY_BACKUP_KEEP` 只清理严格匹配 `inventory-YYYYMMDD-HHMMSS.db` 的文件，
+> `INVENTORY_BACKUP_KEEP` 只清理严格匹配 `inventory-YYYYMMDD-HHMMSS.db` 的文件，  
 > 手工改名或放进去的备份不会被误删。
 
 ### 在线更新
 
-| 变量 | 默认值 | 说明 |
-| --- | --- | --- |
-| `INVENTORY_UPDATE_ENABLED` | `true` | 是否启用在线更新 |
-| `INVENTORY_UPDATE_REPO` | 构建时注入 | 更新仓库，形如 `owner/repo`；留空则整个功能关闭 |
-| `INVENTORY_UPDATE_INTERVAL` | `6h` | 自动检查间隔 |
-| `INVENTORY_UPDATE_TOKEN` | 空 | 可选，访问私有仓库或规避 API 限流 |
+| 变量                          | 默认值    | 说明                             |
+| --------------------------- | ------ | ------------------------------ |
+| `INVENTORY_UPDATE_ENABLED`  | `true` | 是否启用在线更新                       |
+| `INVENTORY_UPDATE_REPO`     | 构建时注入  | 更新仓库，形如 `owner/repo`；留空则整个功能关闭 |
+| `INVENTORY_UPDATE_INTERVAL` | `6h`   | 自动检查间隔                         |
+| `INVENTORY_UPDATE_TOKEN`    | 空      | 可选，访问私有仓库或规避 API 限流            |
 
-> 💡 官方 Release 的二进制已通过 `-ldflags` 注入 `main.updateRepo` 与 `main.version`，开箱即可检查更新。
+> 💡 官方 Release 的二进制已通过 `-ldflags` 注入 `main.updateRepo` 与 `main.version`，开箱即可检查更新。  
 > 自行编译时可以用同样的方式指定（`main.version` 务必填语义化版本号，否则程序会把自己识别为开发构建而拒绝比较）：
 >
 > ```bash
@@ -244,13 +263,13 @@ go build -o inventory-server ./cmd/server
 
 更新器按以下优先级在 Release 附件中挑选安装包，三种命名都能识别：
 
-| 优先级 | 形态 | 示例 |
-| --- | --- | --- |
-| 1 | 归档（含系统名） | `inventory-server-v1.0.0-linux-amd64.tar.gz`（Windows 为 `.zip`） |
-| 2 | 裸可执行文件（含系统名） | `inventory-server-linux-amd64` |
-| 3 | 裸可执行文件（仅架构名） | `inventory-server-amd64` |
+| 优先级 | 形态           | 示例                                                             |
+| --- | ------------ | -------------------------------------------------------------- |
+| 1   | 归档（含系统名）     | `inventory-server-v1.0.0-linux-amd64.tar.gz`（Windows 为 `.zip`） |
+| 2   | 裸可执行文件（含系统名） | `inventory-server-linux-amd64`                                 |
+| 3   | 裸可执行文件（仅架构名） | `inventory-server-amd64`                                       |
 
-第 3 种命名不含操作系统信息，因此**仅在 Linux 上启用**，避免 macOS / Windows 误装 Linux 二进制；
+第 3 种命名不含操作系统信息，因此**仅在 Linux 上启用**，避免 macOS / Windows 误装 Linux 二进制；  
 真正落盘前还会再校验一次可执行文件头（ELF / PE / Mach-O）。
 
 ## 🔄 系统更新怎么用
@@ -264,17 +283,18 @@ go build -o inventory-server ./cmd/server
    - 原子替换并自动重启服务（通常几秒钟）
 4. 更新完成后页面会自动刷新，可确认版本号已变更
 
+
 ### 重启是怎么做到的
 
 替换文件之后，程序用 `syscall.Exec` **就地替换进程映像**：
 
-- **PID 保持不变**，因此 systemd 与 OpenRC 都能继续跟踪同一个进程，不会出现「服务已退出」
+- **PID 保持不变**，因此 systemd 与 OpenRC 都能继续跟踪同一个进程，不会出现「服务已退出」  
   的误判，也不会留下重复进程；
 - 不需要 `Restart=always` 之类的配合，服务定义里只保留异常退出时的兜底重启；
 - 监听端口由内核在 exec 时释放并重新绑定，无需外部进程管理器介入。
 
-> ⚠️ 前提是**运行用户对可执行文件所在目录有写权限**。仓库提供的 systemd 单元已通过
-> `ReadWritePaths=/opt/inventory` 放行；若你换了安装路径，记得同步修改。
+> ⚠️ 前提是**运行用户对可执行文件所在目录有写权限**。仓库提供的 systemd 单元已通过  
+> `ReadWritePaths=/opt/inventory` 放行；若你换了安装路径，记得同步修改。  
 > 权限不足时会返回「备份当前版本失败（请确认对 ... 有写权限）」，且不会改动任何文件。
 
 **回滚方式**：停止服务，把 `<程序名>.old` 覆盖回 `<程序名>`，重新启动即可。
@@ -283,16 +303,16 @@ go build -o inventory-server ./cmd/server
 
 ## 🗄️ 数据维护怎么用
 
-用管理员账号登录，进入 **数据维护** 页面（侧边栏「分析与管理」分组，紧邻「系统更新」）。
+用管理员账号登录，进入 **数据维护** 页面（侧边栏「分析与管理」分组，紧邻「系统更新」）。  
 不方便 SSH 登录服务器时，这一页就能完成备份、恢复与清理。
 
 ### 备份
 
-点 **立即备份** 即生成一份 `inventory-<时间戳>.db`，写入 `INVENTORY_BACKUP_DIR`
-（默认 `<数据目录>/backups`，部署脚本会设为 `/var/backups/inventory`）。
+点 **立即备份** 即生成一份 `inventory-<时间戳>.db`，写入 `INVENTORY_BACKUP_DIR`  
+（默认 `<数据目录>/backups`，部署脚本会设为 `/var/backups/inventory`）。  
 列表里可以直接 **下载** 或 **删除**；页面顶部还会显示备份数量与最近一次备份时间。
 
-> 💡 备份与数据库在同一块磁盘上，**不等于异地容灾**。请定期把下载到的 `.db`
+> 💡 备份与数据库在同一块磁盘上，**不等于异地容灾**。请定期把下载到的 `.db`  
 > 复制到别的机器或对象存储。
 
 ### 恢复
@@ -306,17 +326,20 @@ go build -o inventory-server ./cmd/server
    - 暂存文件换入
 5. 确认数据正确后，可自行删除归档文件
 
-> ⚠️ 恢复会**整体替换**当前数据库。旧库虽被自动归档，仍建议先手动备份一次。
-> 上传的文件若有问题，重启时会被改名为 `inventory.db.restore-failed` 保留证据，
+> ⚠️ 恢复会**整体替换**当前数据库。旧库虽被自动归档，仍建议先手动备份一次。  
+> 上传的文件若有问题，重启时会被改名为 `inventory.db.restore-failed` 保留证据，  
 > **原库不受影响**，服务照常启动。
 
 ### 清理演示数据
 
-页面会先显示将删除的条数（商品 / 库存流水 / 分类 / 供应商）。确认后点执行，
+页面会先显示将删除的条数（商品 / 库存流水 / 分类 / 供应商）。确认后点执行，  
 系统会**先自动做一次安全备份**再删除，备份名会出现在上方的备份列表中。
 
-> 命令行版本（`--purge-demo-data`）与网页版规则完全一致：只删内置演示数据，
-> 仍被商品引用的分类 / 供应商会保留。详见 [deploy/README.md 第 5 节](deploy/README.md#5-清理演示数据)。
+> 命令行版本（`--purge-demo-data`）与网页版规则完全一致：只删带演示标记的数据，  
+> 仍被商品引用的分类 / 供应商会保留。网页上还会列出「SKU 与内置演示编号相同但  
+> 没有演示标记」的商品（可能是您自建的商品，也可能是旧版遗留数据），  
+> 确认属于后者时用命令行加 `--purge-legacy-demo` 处理。  
+> 详见 [deploy/README.md 第 5 节](deploy/README.md#5-清理演示数据)。
 
 ## 🐳 生产部署示例
 
@@ -336,22 +359,22 @@ rc-service inventory status
 tail -f /var/log/inventory/inventory.log
 ```
 
-脚本会自动创建 `inventory` 服务账号、安装二进制到 `/opt/inventory/bin/`、
-生成带随机会话密钥的配置文件、注册开机自启，并配置好**每日自动备份**
-（`/var/backups/inventory`，保留 14 份）。完整说明见
+脚本会自动创建 `inventory` 服务账号、安装二进制到 `/opt/inventory/bin/`、  
+生成带随机会话密钥的配置文件、注册开机自启，并配置好**每日自动备份**  
+（`/var/backups/inventory`，保留 14 份）。完整说明见  
 [deploy/README.md](deploy/README.md)。
 
 ### 备份与换机器
 
-数据库开启了 WAL 模式，**运行中直接 `cp inventory.db` 可能拷到一个空库** ——
+数据库开启了 WAL 模式，**运行中直接 `cp inventory.db` 可能拷到一个空库** ——  
 最新数据还在 `inventory.db-wal` 里没合并。请用 `--backup-db`：
 
 ```bash
 ./inventory-server --backup-db /var/backups/inventory   # 不用停服务
 ```
 
-它内部走 SQLite 的 `VACUUM INTO`，取读事务快照，产出已合并 WAL 的单文件，
-并会立刻回读校验（`integrity_check` + 各表行数）。换机器的完整步骤见
+它内部走 SQLite 的 `VACUUM INTO`，取读事务快照，产出已合并 WAL 的单文件，  
+并会立刻回读校验（`integrity_check` + 各表行数）。换机器的完整步骤见  
 [deploy/README.md 第 6 节](deploy/README.md#6-数据库备份与迁移换机器看这里)。
 
 ### 手动运行
@@ -371,25 +394,25 @@ export INVENTORY_DEFAULT_ROLE=viewer
 ./inventory-server
 ```
 
-> 💡 使用官方 Release 的二进制时，更新仓库已由 CI 通过 `-ldflags` 注入，
-> **无需**再设置 `INVENTORY_UPDATE_REPO`。自行编译的二进制则必须设置，
+> 💡 使用官方 Release 的二进制时，更新仓库已由 CI 通过 `-ldflags` 注入，  
+> **无需**再设置 `INVENTORY_UPDATE_REPO`。自行编译的二进制则必须设置，  
 > 否则「系统更新」功能会显示为未启用。
 
-建议在反向代理（Nginx / Caddy）后运行并启用 HTTPS —— 系统检测到 HTTPS 时会自动加上 HSTS 头，
+建议在反向代理（Nginx / Caddy）后运行并启用 HTTPS —— 系统检测到 HTTPS 时会自动加上 HSTS 头，  
 同时会话 cookie 会带 `Secure` 标记。
 
 ## 📦 技术栈
 
-| 层面 | 选型 |
-| --- | --- |
-| 语言 | Go 1.27 |
-| 数据库 | SQLite（`modernc.org/sqlite`，纯 Go、无 CGO） |
-| HTTP | 标准库 `net/http`（Go 1.22+ 方法+路径模式路由） |
-| 模板 | 标准库 `html/template` + `embed.FS` |
-| 密码 | `golang.org/x/crypto/bcrypt` |
-| 日志 | 标准库 `log/slog` |
-| 更新 | GitHub Releases API + 标准库 `archive/tar`、`archive/zip` |
-| 前端 | 手写 HTML / CSS / 原生 JS，零框架零依赖 |
+| 层面   | 选型                                                    |
+| ---- | ----------------------------------------------------- |
+| 语言   | Go 1.27                                               |
+| 数据库  | SQLite（`modernc.org/sqlite`，纯 Go、无 CGO）               |
+| HTTP | 标准库 `net/http`（Go 1.22+ 方法+路径模式路由）                    |
+| 模板   | 标准库 `html/template` + `embed.FS`                      |
+| 密码   | `golang.org/x/crypto/bcrypt`                          |
+| 日志   | 标准库 `log/slog`                                        |
+| 更新   | GitHub Releases API + 标准库 `archive/tar`、`archive/zip` |
+| 前端   | 手写 HTML / CSS / 原生 JS，零框架零依赖                          |
 
 ## 📁 项目结构
 
@@ -443,14 +466,14 @@ make release-artifacts   # 生成与 CI 一致的发布产物（Linux amd64/arm6
 3. **`.gitignore` 是否误伤源码**，以及构建产物是否被误纳入版本控制；
 4. **`gofmt` / `go vet` / `go build`** 是否通过。
 
-> 💡 **更新代码请用 `git pull`，不要用 GitHub 网页的「上传文件」。**
-> 网页上传只能新增/覆盖文件、无法删除文件，而且以 `.` 开头的隐藏文件与目录
-> （`.gitignore`、`.github/`）在拖拽时常常被系统跳过。结果是旧文件删不掉、新文件传不全，
+> 💡 **更新代码请用 `git pull`，不要用 GitHub 网页的「上传文件」。**  
+> 网页上传只能新增/覆盖文件、无法删除文件，而且以 `.` 开头的隐藏文件与目录  
+> （`.gitignore`、`.github/`）在拖拽时常常被系统跳过。结果是旧文件删不掉、新文件传不全，  
 > 于是出现「编译失败 + CI 不触发」的组合症状。
 
 ### 发布到自己的 GitHub
 
-`scripts/publish.sh` 会替换 README 中的仓库地址占位符、配置提交身份，并在检测到已登录的
+`scripts/publish.sh` 会替换 README 中的仓库地址占位符、配置提交身份，并在检测到已登录的  
 `gh` CLI 时直接创建远程仓库并推送：
 
 ```bash
@@ -463,18 +486,15 @@ make release-artifacts   # 生成与 CI 一致的发布产物（Linux amd64/arm6
   1. **代码检查** — `go mod tidy` 差异、`gofmt`、`go vet`
   2. **编译与测试** — 构建全部包、`go test -race`、输出覆盖率
   3. **端到端冒烟测试** — 真实启动服务，校验健康探针与关键页面
-
-- **Release**（同一个 `ci.yml` 内的 `release` 作业）— 推送到 `main` / `master`
+- **Release**（同一个 `ci.yml` 内的 `release` 作业）— 推送到 `main` / `master`  
   或手动触发时自动发版，只产出 **Linux 的两个架构**：
-
   1. `test` 作业先依据历史 Tag 算出本次版本号（`v1.0.01` → `v1.0.02` …）
-  2. 用该版本号交叉编译 `linux/amd64` 与 `linux/arm64`，并通过 `-ldflags` 注入
+  2. 用该版本号交叉编译 `linux/amd64` 与 `linux/arm64`，并通过 `-ldflags` 注入  
      `main.version` 与 `main.updateRepo`，**两者缺一都会导致更新功能不可用**
   3. 生成 `checksums.txt`（SHA-256）
   4. `release` 作业复用同一个版本号创建 GitHub Release，上传两个二进制与校验和文件
-
-  > ⚠️ 版本号必须在**编译之前**算出来。若直接用 `github.ref_name`，在推送 `main`
-  > 的场景下取到的值是分支名 `main` 而不是 Tag，发布出去的程序会把自己识别为开发构建，
+  > ⚠️ 版本号必须在**编译之前**算出来。若直接用 `github.ref_name`，在推送 `main`  
+  > 的场景下取到的值是分支名 `main` 而不是 Tag，发布出去的程序会把自己识别为开发构建，  
   > 从而永远无法比较版本。
 
 ## 🔒 安全说明
@@ -488,36 +508,51 @@ make release-artifacts   # 生成与 CI 一致的发布产物（Linux amd64/arm6
 - 安全问题答案用 bcrypt 哈希存储，校验时遍历全部题目（不短路），避免通过响应时间推测答对数量
 - 自更新只允许从 GitHub 官方域名下载，强制 HTTPS，并限制安装包体积上限
 - 自更新必须先通过 SHA-256 校验才会替换文件，替换失败自动回滚
-- 校验和优先取发布中的 `checksums.txt`，缺失时回退到 GitHub API 的附件摘要（`asset.digest`）；
+- 校验和优先取发布中的 `checksums.txt`，缺失时回退到 GitHub API 的附件摘要（`asset.digest`）；  
   两者都没有时直接中止更新，绝不降级为「不校验」
-- 裸二进制发布形态在落盘前会校验可执行文件头（ELF / PE / Mach-O），防止把其它系统的
+- 裸二进制发布形态在落盘前会校验可执行文件头（ELF / PE / Mach-O），防止把其它系统的  
   可执行文件装到当前平台
-- 备份的下载与删除都先做文件名白名单校验（拒绝路径分隔符与 `..`，只接受 `.db`），
+- 备份的下载与删除都先做文件名白名单校验（拒绝路径分隔符与 `..`，只接受 `.db`），  
   且校验解析后的绝对路径确实落在备份目录内，杜绝路径穿越
-- 上传的备份必须先通过 SQLite 完整性检查（`integrity_check`）才允许暂存，
+- 上传的备份必须先通过 SQLite 完整性检查（`integrity_check`）才允许暂存，  
   不合格立即拒绝且不写入磁盘
-- 上传体积上限 512 MB，且在解析之前就用 `http.MaxBytesReader` 套住 body，
+- 上传体积上限 512 MB，且在解析之前就用 `http.MaxBytesReader` 套住 body，  
   避免超大请求先把临时目录写满
-- CSRF 校验区分 `multipart/form-data` 与 `urlencoded` —— `ParseForm` 不解析 multipart
+- CSRF 校验区分 `multipart/form-data` 与 `urlencoded` —— `ParseForm` 不解析 multipart  
   body，若不单独处理会让所有文件上传表单的 `_csrf` 字段读不到而被误判为攻击
+- **未登录的 `multipart` 请求在解析 body 之前就被拒绝** —— CSRF 中间件跑在鉴权之前，  
+  否则任何人都能在没有任何凭据的情况下发起一次 512 MB 的上传把磁盘写满
+- **来源 IP 只在请求确实来自可信代理时才采信转发头**（`INVENTORY_TRUSTED_PROXIES`，  
+  默认只信任回环地址）。取值用 `X-Forwarded-For` 中**最右侧的不可信地址**：  
+  反向代理是追加而非覆盖，取最左值等于让任何人用请求头伪造来源 IP
+- **登录限流按「账号 + 来源 IP」为主、账号总量为兜底**（阈值 10 倍）。  
+  单看账号总数就锁定的话，攻击者无需任何凭据、每 15 分钟发 5 次错误密码  
+  就能把别人的账号永久锁死
+- **被限流的请求只留痕、不计入失败次数**，否则攻击者持续发请求就能不断刷新  
+  计数窗口，让锁定永远不过期
+- **修改邮箱需要重新输入当前密码** —— 邮箱是找回密码的凭据，仅靠会话即可修改  
+  的话，会话被窃取后攻击者能直接把找回通道指向自己
+- **CSV 导出做公式注入防护** —— 商品名、SKU、备注等自由输入以 `=` `+` `-` `@`  
+  开头时会被表格软件当公式求值，导出时统一加前缀转义（纯负数除外，避免破坏排序求和）
+- **演示数据清理默认只认 `is_demo` 标记**，不按 SKU 兜底删除 —— SKU 是用户可自由  
+  填写的字段，按 SKU 匹配会误删用户自建商品及其全部库存流水（旧库兼容需显式  
+  `--purge-legacy-demo`）
+- **`INVENTORY_DEFAULT_ROLE` 拒绝 `admin`** —— 开放注册 + 默认管理员等于任何人  
+  自助获得最高权限，这类配置直接让启动失败而不是静默放行
 
 ### 已知权衡
 
-使用安全问题替代邮件找回，意味着**第一步需要展示问题**，因此无法像邮箱方式那样完全隐藏
+使用安全问题替代邮件找回，意味着**第一步需要展示问题**，因此无法像邮箱方式那样完全隐藏  
 「该账号是否存在」。这是安全性（自助找回的可用性）与隐私性之间的取舍，系统通过以下方式降低风险：
 
 - 对同一标识的查询与答题做频率限制（默认 15 分钟内 5 次）
 - 账号被禁用时与不存在时返回相同的提示
 - 答案永不回显，问题文本不做模糊匹配
 
-如果对账号枚举风险更敏感，可以关闭自助注册（`INVENTORY_ALLOW_REGISTRATION=false`），
+如果对账号枚举风险更敏感，可以关闭自助注册（`INVENTORY_ALLOW_REGISTRATION=false`），  
 由管理员统一开设账号。
 
-
-
-https://github.com/user-attachments/assets/1762701e-bd6c-423f-9165-92f579492900
-
-
+<https://github.com/user-attachments/assets/1762701e-bd6c-423f-9165-92f579492900>
 
 ## 📄 许可证
 
