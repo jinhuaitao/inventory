@@ -508,6 +508,12 @@ make release-artifacts   # 生成与 CI 一致的发布产物（Linux amd64/arm6
 如果对账号枚举风险更敏感，可以关闭自助注册（`INVENTORY_ALLOW_REGISTRATION=false`），
 由管理员统一开设账号。
 
+
+
+https://github.com/user-attachments/assets/1762701e-bd6c-423f-9165-92f579492900
+
+
+
 ## 📄 许可证
 
 [MIT](LICENSE)
