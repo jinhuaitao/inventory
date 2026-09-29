@@ -72,6 +72,9 @@ type PageData struct {
 	Version           string
 	Year              int
 	Data              any
+	// AssetVersion 是静态资源的内容指纹，模板用它给 /static/ 下的 URL
+	// 加 ?v= 参数。见 web.StaticVersion 的说明。
+	AssetVersion string
 }
 
 // render 渲染页面。
@@ -91,6 +94,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, status int, tmp
 		Version:           Version,
 		Year:              time.Now().In(utils.DisplayZone).Year(),
 		Data:              data,
+		AssetVersion:      web.StaticVersion(),
 	}
 	h.renderer.Render(w, status, tmpl, pd)
 }
@@ -286,8 +290,13 @@ func (h *Handler) staticHandler() http.Handler {
 	fileServer := http.FileServer(http.FS(sub))
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// 带内容指纹的资源可长期缓存；这里统一使用 1 小时并允许重新验证
-		w.Header().Set("Cache-Control", "public, max-age=3600")
+		// 资源 URL 带内容指纹（模板里用 ?v={{.AssetVersion}} 生成），
+		// 因此可以放心长期缓存：内容一变指纹就变，URL 变了浏览器自然会重新拉取。
+		//
+		// ⚠️ 千万不要去掉指纹却保留长 max-age —— 一旦浏览器缓存了旧脚本，
+		// 而响应又没有 ETag / Last-Modified，它将无法重新验证，
+		// 二进制更新后前端会继续跑旧代码（页面文案是新的、功能是旧的）。
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
 		fileServer.ServeHTTP(w, r)
 	})
 }
