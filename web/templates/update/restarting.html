@@ -1,7 +1,15 @@
 {{define "content"}}
 <div class="page page-narrow">
 
-  <div class="update-restarting">
+  {{/* 倒计时与自动刷新由 /static/js/app.js 的 initRestartWatcher 驱动，
+       这里不能写内联脚本：站点 CSP 为 script-src 'self'，内联脚本会被
+       浏览器直接拒绝执行，页面就永远不会自动刷新。
+       Countdown 由 handlers.restartCountdown() 推导，必须大于重启延迟，
+       否则探测会命中尚未退出的旧进程。 */}}
+  <div class="update-restarting"
+       data-restart-target="{{.Data.Refresh}}"
+       data-restart-probe="/readyz"
+       data-restart-seconds="{{.Data.Countdown}}">
     <div class="restart-spinner" aria-hidden="true">
       <svg viewBox="0 0 50 50" width="56" height="56">
         <circle cx="25" cy="25" r="20" fill="none" stroke="currentColor" stroke-opacity="0.15" stroke-width="4"/>
@@ -26,27 +34,18 @@
       </span>
     </div>
 
-    <p class="update-restarting-hint">页面将在 <span id="restartCountdown">5</span> 秒后自动刷新……</p>
+    <p class="update-restarting-hint" data-restart-hint>
+      页面将在 <span data-restart-countdown>{{.Data.Countdown}}</span> 秒后自动刷新……
+    </p>
 
     <a href="{{.Data.Refresh}}" class="btn btn-primary">立即刷新</a>
+
+    <noscript>
+      <p class="update-restarting-hint">
+        当前浏览器未启用 JavaScript，页面不会自动刷新。请稍候片刻后点击上方按钮。
+      </p>
+    </noscript>
   </div>
 
 </div>
-{{end}}
-
-{{define "scripts"}}
-<script>
-  (function () {
-    var seconds = 5;
-    var el = document.getElementById('restartCountdown');
-    var timer = setInterval(function () {
-      seconds -= 1;
-      if (el) { el.textContent = String(Math.max(seconds, 0)); }
-      if (seconds <= 0) {
-        clearInterval(timer);
-        window.location.replace({{.Data.Refresh}});
-      }
-    }, 1000);
-  })();
-</script>
 {{end}}

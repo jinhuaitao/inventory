@@ -13,7 +13,9 @@
     {{end}}
   </span>
   <span class="flash-text">{{.Message}}</span>
-  <button type="button" class="flash-close" aria-label="关闭" onclick="this.parentElement.remove()">
+  {{/* 关闭按钮不能使用内联事件处理器：站点 CSP 为 script-src 'self'，
+       会被浏览器直接拒绝执行，表现为点了没反应。交给 app.js 绑定。 */}}
+  <button type="button" class="flash-close" aria-label="关闭" data-dismiss-flash>
     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6L6 18M6 6l12 12"/></svg>
   </button>
 </div>

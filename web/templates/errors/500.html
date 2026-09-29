@@ -8,7 +8,9 @@
   </p>
   <div class="error-actions">
     <a href="/" class="btn btn-primary">返回首页</a>
-    <a href="javascript:history.back()" class="btn btn-outline">返回上一页</a>
+    {{/* 「返回上一页」不能使用 javascript 伪协议：站点 CSP 为 script-src 'self'，
+       伪协议同样会被拦掉，点了没有任何反应。 */}}
+    <button type="button" class="btn btn-outline" data-history-back>返回上一页</button>
   </div>
 </div>
 {{end}}

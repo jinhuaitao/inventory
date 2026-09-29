@@ -265,6 +265,113 @@
     }
   }
 
+  /* ---------------------------------------------------- 提示条关闭 / 返回 */
+  // 这两处的原实现分别用了内联 onclick 与 href="javascript:"，
+  // 都会被 CSP 的 script-src 'self' 拦掉（内联事件处理器与 javascript:
+  // 伪协议同样属于内联脚本），表现为「点了没反应」。改为 data-* + 本文件绑定。
+  function initFlashDismiss() {
+    $$('[data-dismiss-flash]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        var box = btn.closest('.flash') || btn.parentElement;
+        if (box) box.remove();
+      });
+    });
+  }
+
+  function initHistoryBack() {
+    $$('[data-history-back]').forEach(function (btn) {
+      btn.addEventListener('click', function () {
+        if (window.history.length > 1) window.history.back();
+        else window.location.assign('/');
+      });
+    });
+  }
+
+  /* ---------------------------------------------------- 重启等待与自动刷新 */
+  // 「更新完成 / 数据恢复」后展示的等待页。
+  //
+  // ⚠️ 这段逻辑必须放在本文件里，不能内联在模板的 <script> 中：
+  //    站点 CSP 是 script-src 'self'（见 middleware.SecurityHeaders），
+  //    内联脚本会被浏览器直接拒绝执行，倒计时永远停在初始值，
+  //    页面也就永远不会自动刷新。
+  //
+  // 行为：倒计时走完后**轮询就绪探针**，探针通过才跳转。
+  // 之所以不是「定时到了直接跳」，是因为重启链路耗时并不固定 ——
+  // Restart 有延迟 → syscall.Exec 替换进程映像 → 重新打开数据库 →
+  // 跑迁移 → 重新监听端口，恢复数据时还要先归档旧库、清 WAL、换入新库。
+  // 固定几秒后跳转，很容易在服务尚未就绪时落到浏览器的错误页，且没有重试。
+  //
+  // 容器上的 data-*：
+  //   data-restart-target   就绪后跳转的地址
+  //   data-restart-probe    就绪探针，默认 /readyz（同源、无需登录）
+  //   data-restart-seconds  跳转前的倒计时秒数，默认 5
+  function initRestartWatcher() {
+    var box = $('[data-restart-target]');
+    if (!box) return;
+
+    var target = box.getAttribute('data-restart-target');
+    if (!target) return;
+
+    var probeURL = box.getAttribute('data-restart-probe') || '/readyz';
+    var countdownEl = $('[data-restart-countdown]', box);
+    var hintEl = $('[data-restart-hint]', box);
+
+    var seconds = parseInt(box.getAttribute('data-restart-seconds') || '5', 10);
+    if (isNaN(seconds) || seconds < 0) seconds = 5;
+
+    var POLL_INTERVAL = 1000;
+    var MAX_POLLS = 120; // 最多等约 2 分钟，避免异常时无限轮询
+
+    var timer = null;
+    var polls = 0;
+    var finished = false;
+
+    function setHint(text) {
+      if (hintEl) hintEl.textContent = text;
+    }
+
+    function finish() {
+      if (finished) return;
+      finished = true;
+      if (timer) clearInterval(timer);
+      window.location.replace(target);
+    }
+
+    // 服务尚未起来时 fetch 会直接 reject（连接被拒），静默重试即可
+    function probe() {
+      fetch(probeURL, { cache: 'no-store', credentials: 'same-origin' })
+        .then(function (res) { if (res.ok) finish(); })
+        .catch(function () { /* 还没就绪，等下一轮 */ });
+    }
+
+    function startWaiting() {
+      setHint('服务正在重启，正在等待它重新就绪……');
+      probe();
+      timer = setInterval(function () {
+        polls += 1;
+        if (polls > MAX_POLLS) {
+          clearInterval(timer);
+          setHint('等待时间超出预期，请点击下方按钮手动刷新。');
+          return;
+        }
+        probe();
+      }, POLL_INTERVAL);
+    }
+
+    // 倒计时期间绝不能探测：重启前有约 1.2 秒的延迟（handlers.restartDelay），
+    // 旧进程在这段时间里仍在正常响应 /readyz。过早探测会在旧进程上
+    // 「刷新成功」，用户看到的还是旧版本 / 恢复前的数据。
+    timer = setInterval(function () {
+      seconds -= 1;
+      if (countdownEl) countdownEl.textContent = String(Math.max(seconds, 0));
+      if (seconds <= 0) {
+        clearInterval(timer);
+        timer = null;
+        startWaiting();
+      }
+    }, 1000);
+  }
+
   /* ---------------------------------------------------------------- 启动 */
   function init() {
     initSidebar();
@@ -274,6 +381,9 @@
     initConfirm();
     initStockForm();
     initAutofocus();
+    initFlashDismiss();
+    initHistoryBack();
+    initRestartWatcher();
   }
 
   if (document.readyState === 'loading') {
