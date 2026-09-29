@@ -62,6 +62,9 @@ INVENTORY_UPDATE_ENABLED="true"
 # INVENTORY_UPDATE_INTERVAL="6h"
 
 # ---------- 注册与角色 ----------
+# 自助注册的**初始**开关。管理员可在「用户管理」页随时覆盖它：
+# 页面上的设置优先于本变量，并写入数据库、重启后保留；
+# 页面上还有「恢复为环境变量默认值」按钮把控制权交还到这里。
 INVENTORY_ALLOW_REGISTRATION="false"
 # 可选 viewer（只读）/ manager（仓管员）。
 # ⚠️ 不允许填 admin：开放注册 + 默认管理员 = 任何人自助获得最高权限，

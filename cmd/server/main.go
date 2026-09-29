@@ -176,6 +176,13 @@ func run() error {
 	handlers.Version = version
 	h := handlers.New(store, renderer, sessions, updaterSvc, mw, cfg, logger)
 
+	// 载入运行期设置：自助注册开关（页面上的设置优先于环境变量默认值）。
+	// 必须早于对外提供 HTTP 服务 —— 内存里的零值是「关闭」，
+	// 漏掉这一步会让一个本来开放注册的站点静默变成关闭。
+	if err := h.InitRegistration(setupCtx); err != nil {
+		return err
+	}
+
 	// ---------- HTTP 服务 ----------
 	srv := &http.Server{
 		Addr:              cfg.Addr,
@@ -195,6 +202,15 @@ func run() error {
 			"提醒", "生产环境请通过 INVENTORY_ADMIN_PASSWORD 覆盖，并登录后立即修改",
 		)
 	}
+
+	// 自助注册的生效值可能已被管理员在页面上覆盖，与当前环境变量并不一致。
+	// 明确打印出来，免得排查「注册入口怎么不见了」时绕弯路。
+	regEnabled, regExplicit := h.RegistrationStatus()
+	regSource := "环境变量 INVENTORY_ALLOW_REGISTRATION"
+	if regExplicit {
+		regSource = "用户管理页的设置"
+	}
+	logger.Info("自助注册状态已就绪", "是否开放", regEnabled, "来源", regSource)
 	// ---------- 后台任务 ----------
 	cleanupCtx, stopCleanup := context.WithCancel(context.Background())
 	defer stopCleanup()

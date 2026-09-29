@@ -480,6 +480,7 @@ coscmd upload -r /var/backups/inventory/ /inventory-backups/
 | `INVENTORY_ADDR` | 监听地址，默认 `:8080` |
 | `INVENTORY_SEED_DEMO_DATA` | 是否写入演示数据；不设置时 production 为 false、其他为 true |
 | `INVENTORY_TRUSTED_PROXIES` | 允许采信 `X-Forwarded-For` / `X-Real-IP` 的网段，默认 `127.0.0.1/8,::1/128`。代理在别的机器上时必须显式配置，**不要**填 `0.0.0.0/0` |
+| `INVENTORY_ALLOW_REGISTRATION` | 自助注册的**初始**开关。管理员可在「用户管理」页随时覆盖它，**页面设置优先于本变量**，改完不必重启；页面上还有「恢复为环境变量默认值」把控制权交还到这里 |
 | `INVENTORY_DEFAULT_ROLE` | 自助注册者的默认角色，可选 `viewer` / `manager`。**填 `admin` 会让程序拒绝启动**（等于任何人自助获得管理员） |
 | `INVENTORY_MAX_LOGIN_ATTEMPTS` | 同一「账号 + 来源 IP」的失败上限，默认 5。同一账号跨来源的兜底上限是它的 10 倍 |
 | `INVENTORY_LOCKOUT_WINDOW` | 上述失败计数的统计窗口，默认 `15m` |

@@ -33,6 +33,13 @@ type Handler struct {
 	mw       *middleware.Manager
 	cfg      *config.Config
 	logger   *slog.Logger
+
+	// registration 是「是否开放自助注册」的运行期开关。
+	//
+	// 它不同于 cfg.AllowRegistration：后者是环境变量给出的**默认值**，
+	// 前者是最终生效值，可由管理员在「用户管理」页随时调整。
+	// 必须在对外服务之前调用 InitRegistration 载入。
+	registration registrationState
 }
 
 // New 创建处理器集合。
@@ -89,7 +96,7 @@ func (h *Handler) render(w http.ResponseWriter, r *http.Request, status int, tmp
 		CurrentPath:       r.URL.Path,
 		Query:             r.URL.Query(),
 		Env:               h.cfg.Env,
-		AllowRegistration: h.cfg.AllowRegistration,
+		AllowRegistration: h.AllowRegistration(),
 		UpdateEnabled:     h.cfg.UpdateConfigured(),
 		Version:           Version,
 		Year:              time.Now().In(utils.DisplayZone).Year(),

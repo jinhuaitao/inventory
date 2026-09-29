@@ -249,7 +249,9 @@ func securityErrors(err error) map[string]string {
 
 // RegisterPage 渲染注册页。
 func (h *Handler) RegisterPage(w http.ResponseWriter, r *http.Request) {
-	if !h.cfg.AllowRegistration {
+	// 用运行期开关而不是配置默认值：管理员可以在「用户管理」页随时关闭注册，
+	// 关闭后这个页面必须立刻拒绝访问，而不是等到下次重启。
+	if !h.AllowRegistration() {
 		h.renderRegister(w, r, http.StatusForbidden, map[string]string{}, map[string]string{
 			"form": "系统已关闭自助注册，请联系管理员开通账号",
 		}, true, 0, "")
@@ -260,7 +262,8 @@ func (h *Handler) RegisterPage(w http.ResponseWriter, r *http.Request) {
 
 // RegisterSubmit 处理注册表单。
 func (h *Handler) RegisterSubmit(w http.ResponseWriter, r *http.Request) {
-	if !h.cfg.AllowRegistration {
+	// 同上：注册页被关闭后，直接 POST 到这个地址也必须被挡住。
+	if !h.AllowRegistration() {
 		utils.SetError(w, "系统已关闭自助注册")
 		http.Redirect(w, r, "/login", http.StatusSeeOther)
 		return

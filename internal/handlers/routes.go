@@ -107,6 +107,8 @@ func (h *Handler) registerAppRoutes(mux *http.ServeMux) {
 
 	// 用户管理
 	mux.HandleFunc("GET /users", h.UserList)
+	// 自助注册开关（管理员）：表单携带的是目标状态，不是「切换」
+	mux.HandleFunc("POST /users/registration", h.UserRegistrationToggle)
 	mux.HandleFunc("GET /users/new", h.UserNew)
 	mux.HandleFunc("POST /users", h.UserCreate)
 	mux.HandleFunc("GET /users/{id}/edit", h.UserEdit)

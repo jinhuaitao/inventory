@@ -40,10 +40,11 @@ func (h *Handler) UserList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.render(w, r, http.StatusOK, "users/list.html", "用户管理", "users", map[string]any{
-		"Users":      users,
-		"Pagination": pg,
-		"Filter":     f,
-		"Roles":      models.AllRoles(),
+		"Users":        users,
+		"Pagination":   pg,
+		"Filter":       f,
+		"Roles":        models.AllRoles(),
+		"Registration": h.registrationPageData(),
 	})
 }
 
