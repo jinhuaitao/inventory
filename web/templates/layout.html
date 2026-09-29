@@ -5,8 +5,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <title>{{.Title}} · {{.AppName}}</title>
-  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <link rel="stylesheet" href="/static/css/app.css">
+  {{/* ?v={{.AssetVersion}} 是静态资源的内容指纹：内容一变 URL 就变，
+       浏览器必然重新拉取。不要去掉它，否则升级二进制后浏览器会继续用
+       缓存里的旧 JS / CSS（静态资源是按长期缓存下发的）。 */}}
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg?v={{.AssetVersion}}">
+  <link rel="stylesheet" href="/static/css/app.css?v={{.AssetVersion}}">
   {{block "head" .}}{{end}}
 </head>
 <body class="{{if .User}}layout-app{{else}}layout-auth{{end}}">
@@ -89,7 +92,7 @@
   </div>
 {{end}}
 
-<script src="/static/js/app.js" defer></script>
+<script src="/static/js/app.js?v={{.AssetVersion}}" defer></script>
 {{block "scripts" .}}{{end}}
 </body>
 </html>

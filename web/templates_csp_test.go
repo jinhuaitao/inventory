@@ -2,6 +2,7 @@ package web
 
 import (
 	"bytes"
+	"encoding/hex"
 	"html/template"
 	"io/fs"
 	"regexp"
@@ -21,7 +22,47 @@ var (
 	scriptTagRe   = regexp.MustCompile(`(?is)<script\b[^>]*>`)
 	inlineEventRe = regexp.MustCompile(`(?i)\son[a-z]+\s*=\s*["']`)
 	jsURLRe       = regexp.MustCompile(`(?i)(?:href|src|action)\s*=\s*["']\s*javascript:`)
+	staticRefRe   = regexp.MustCompile(`(?i)(?:href|src)\s*=\s*"(/static/[^"]*)"`)
 )
+
+// StaticVersion 是静态资源 URL 的指纹来源，必须稳定且非空，
+// 否则所有带 ?v= 的 URL 会退化成同一个值，等于没有指纹。
+func TestStaticVersionIsStableAndNonEmpty(t *testing.T) {
+	v := StaticVersion()
+	if len(v) != 12 {
+		t.Fatalf("StaticVersion() = %q，期望 12 位十六进制", v)
+	}
+	if _, err := hex.DecodeString(v); err != nil {
+		t.Fatalf("StaticVersion() = %q 不是合法的十六进制: %v", v, err)
+	}
+	if again := StaticVersion(); again != v {
+		t.Errorf("两次调用结果不一致: %q vs %q", v, again)
+	}
+}
+
+// 静态资源按 max-age=31536000, immutable 下发，所以模板里的每一个
+// /static/ 引用都必须带内容指纹；漏掉一个，那个文件就会被浏览器
+// 永久缓存，二进制升级后也拿不到新版本。
+func TestStaticReferencesAreFingerprinted(t *testing.T) {
+	err := fs.WalkDir(FS, "templates", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() || !strings.HasSuffix(p, ".html") {
+			return err
+		}
+		raw, err := fs.ReadFile(FS, p)
+		if err != nil {
+			return err
+		}
+		for _, m := range staticRefRe.FindAllStringSubmatch(string(raw), -1) {
+			if !strings.Contains(m[1], "?v=") {
+				t.Errorf("%s: 静态资源引用缺少内容指纹: %s", p, m[1])
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("遍历模板失败: %v", err)
+	}
+}
 
 func TestTemplatesHaveNoCSPBlockedInlineScript(t *testing.T) {
 	err := fs.WalkDir(FS, "templates", func(p string, d fs.DirEntry, err error) error {
