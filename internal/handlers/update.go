@@ -8,6 +8,20 @@ import (
 // 重启前留给浏览器渲染「正在重启」页面的时间。
 const restartDelay = 1200 * time.Millisecond
 
+// restartCountdown 返回「正在重启」页面上自动刷新的倒计时秒数。
+//
+// ⚠️ 必须显著大于 restartDelay。页面在倒计时结束前不会去探测就绪探针，
+// 而 restartDelay 这段时间里旧进程仍在正常响应 /readyz —— 倒计时若小于
+// 该延迟，探测会命中尚未退出的旧进程，页面「刷新成功」但看到的还是
+// 旧版本 / 恢复前的数据。这里用延迟 + 4 秒的余量，并保底 5 秒。
+func restartCountdown() int {
+	secs := int(restartDelay.Seconds()) + 4
+	if secs < 5 {
+		secs = 5
+	}
+	return secs
+}
+
 // UpdatePage 展示系统更新页面（仅管理员）。
 func (h *Handler) UpdatePage(w http.ResponseWriter, r *http.Request) {
 	if !h.canManageUsers(w, r) {
@@ -63,10 +77,11 @@ func (h *Handler) UpdateApply(w http.ResponseWriter, r *http.Request) {
 
 	// 已替换文件，渲染重启提示页后重启进程
 	h.render(w, r, http.StatusOK, "update/restarting.html", "正在重启", "update", map[string]any{
-		"From":    result.FromVersion,
-		"To":      result.ToVersion,
-		"Backup":  result.BackupPath,
-		"Refresh": "/admin/update",
+		"From":      result.FromVersion,
+		"To":        result.ToVersion,
+		"Backup":    result.BackupPath,
+		"Refresh":   "/admin/update",
+		"Countdown": restartCountdown(),
 	})
 
 	// 把响应推回浏览器后再替换进程映像
