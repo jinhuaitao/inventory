@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"inventory/internal/middleware"
+	"inventory/web"
 )
 
 // Routes 构建完整的路由表与中间件链。
@@ -16,7 +17,9 @@ func (h *Handler) Routes() http.Handler {
 	root.HandleFunc("GET /healthz", h.Health)
 	root.HandleFunc("GET /readyz", h.Ready)
 	root.HandleFunc("GET /favicon.ico", func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/static/favicon.svg", http.StatusMovedPermanently)
+		// 带上内容指纹：静态资源是按长期缓存下发的，而这个 301 本身也会被
+		// 浏览器永久缓存，不带指纹就等于把某个旧版本的图标钉死。
+		http.Redirect(w, r, "/static/favicon.svg?v="+web.StaticVersion(), http.StatusMovedPermanently)
 	})
 
 	// ---------- 认证（无需登录）----------
