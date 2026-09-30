@@ -480,7 +480,7 @@ coscmd upload -r /var/backups/inventory/ /inventory-backups/
 | `INVENTORY_ADDR` | 监听地址，默认 `:8080` |
 | `INVENTORY_SEED_DEMO_DATA` | 是否写入演示数据；不设置时 production 为 false、其他为 true |
 | `INVENTORY_TRUSTED_PROXIES` | 允许采信 `X-Forwarded-For` / `X-Real-IP` 的网段，默认 `127.0.0.1/8,::1/128`。代理在别的机器上时必须显式配置，**不要**填 `0.0.0.0/0` |
-| `INVENTORY_ALLOW_REGISTRATION` | 自助注册的**初始**开关。管理员可在「用户管理」页随时覆盖它，**页面设置优先于本变量**，改完不必重启；页面上还有「恢复为环境变量默认值」把控制权交还到这里 |
+| `INVENTORY_ALLOW_REGISTRATION` | 自助注册的**初始**开关。管理员可在「用户管理」页随时开启 / 关闭它，**页面设置优先于本变量**，改完不必重启 |
 | `INVENTORY_DEFAULT_ROLE` | 自助注册者的默认角色，可选 `viewer` / `manager`。**填 `admin` 会让程序拒绝启动**（等于任何人自助获得管理员） |
 | `INVENTORY_MAX_LOGIN_ATTEMPTS` | 同一「账号 + 来源 IP」的失败上限，默认 5。同一账号跨来源的兜底上限是它的 10 倍 |
 | `INVENTORY_LOCKOUT_WINDOW` | 上述失败计数的统计窗口，默认 `15m` |
@@ -562,7 +562,7 @@ server {
 | 恢复后发现数据没变，但多了 `inventory.db.restore-failed` | 上传的文件没通过完整性检查，原库被保留；换一份备份重试 |
 | 上传恢复表单报 403 安全校验未通过 | 页面停留过久导致令牌过期，刷新后重试；若刷新仍报错，说明 CSRF 中间件未能读取 multipart 表单（已修复，见 `internal/middleware`） |
 | 迁移后报 `attempt to write a readonly database` | 忘了 `chown inventory:inventory /var/lib/inventory/inventory.db` |
-| 登录页不显示「立即注册」入口 | 管理员在「用户管理」页关闭了自助注册。该页面的设置**优先于** `INVENTORY_ALLOW_REGISTRATION`，在那里开启，或点「恢复为环境变量默认值」把控制权交还配置 |
+| 登录页不显示「立即注册」入口 | 管理员在「用户管理」页关闭了自助注册。该页面的设置**优先于** `INVENTORY_ALLOW_REGISTRATION`，到那里重新开启即可 |
 | 改了 `INVENTORY_ALLOW_REGISTRATION` 但注册状态没变 | 同上：页面上已经设置过就会覆盖环境变量。启动日志里有一行「自助注册状态已就绪」，会写明当前取值来自哪一边 |
 | 从备份恢复后注册状态变了 | 开关存在数据库里，会跟着备份一起恢复。恢复完到「用户管理」页确认一次即可 |
 | 迁移后所有人都要重新登录 | 新机器的 `INVENTORY_SESSION_SECRET` 与旧机器不一致 |

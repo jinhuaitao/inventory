@@ -189,38 +189,6 @@ func TestUserRegistrationTogglePersistsState(t *testing.T) {
 	}
 }
 
-// 恢复默认应当清除页面设置，让开关重新由环境变量决定。
-func TestUserRegistrationToggleResetRestoresEnvDefault(t *testing.T) {
-	h := newRegistrationTestHandler(t, true) // 环境变量默认开启
-	ctx := context.Background()
-	admin := testUser(models.RoleAdmin)
-
-	// 先在页面上关闭
-	h.UserRegistrationToggle(httptest.NewRecorder(),
-		registrationRequest(url.Values{"enabled": {"false"}}, admin))
-	if h.AllowRegistration() {
-		t.Fatal("页面上关闭后应为关闭")
-	}
-
-	// 再恢复默认
-	rec := httptest.NewRecorder()
-	h.UserRegistrationToggle(rec, registrationRequest(url.Values{"action": {"reset"}}, admin))
-	if rec.Code != http.StatusSeeOther {
-		t.Fatalf("恢复默认应重定向，实际状态码 %d", rec.Code)
-	}
-	if !h.AllowRegistration() {
-		t.Error("恢复默认后应回到环境变量取值（开启）")
-	}
-	if _, explicit := h.RegistrationStatus(); explicit {
-		t.Error("恢复默认后不应再标记为「页面设置」")
-	}
-	if st, err := h.store.RegistrationState(ctx, false); err != nil {
-		t.Fatalf("读取注册开关失败: %v", err)
-	} else if st.Explicit {
-		t.Error("恢复默认后数据库中不应还留着设置记录")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // 注册入口的准入
 // ---------------------------------------------------------------------------
@@ -345,17 +313,20 @@ func TestRegistrationFallsBackToConfigWhenDatabaseUnavailable(t *testing.T) {
 // 畸形请求
 // ---------------------------------------------------------------------------
 
-// 参数缺失 / 取值非法 / 动作未知都必须被拒绝，绝不能因为「读不到就当作 false」
+// 参数缺失 / 取值非法都必须被拒绝，绝不能因为「读不到就当作 false」
 // 而把一次畸形请求变成「静默关闭注册」。
+//
+// 最后一条覆盖旧版页面：那个版本会提交 action=reset 而不带 enabled，
+// 现在这个动作已经取消，收到它必须被当成畸形请求拒绝，而不是碰巧关掉注册。
 func TestUserRegistrationToggleRejectsMalformedPayload(t *testing.T) {
 	cases := []struct {
 		name string
 		form url.Values
 	}{
-		{"缺少 enabled", url.Values{"action": {"set"}}},
-		{"enabled 取值非法", url.Values{"action": {"set"}, "enabled": {"yes"}}},
-		{"enabled 为空", url.Values{"action": {"set"}, "enabled": {""}}},
-		{"动作未知", url.Values{"action": {"delete"}, "enabled": {"true"}}},
+		{"缺少 enabled", url.Values{}},
+		{"enabled 取值非法", url.Values{"enabled": {"yes"}}},
+		{"enabled 为空", url.Values{"enabled": {""}}},
+		{"旧版页面的恢复默认请求", url.Values{"action": {"reset"}}},
 	}
 
 	for _, tc := range cases {

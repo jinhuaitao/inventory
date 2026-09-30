@@ -14,19 +14,13 @@ import (
 // ---------------------------------------------------------------------------
 // 自助注册开关
 //
-// 取值优先级：settings 表中的显式设置（管理员在「用户管理」页调整）
-// 高于配置项 INVENTORY_ALLOW_REGISTRATION 给出的默认值。
-// 环境变量决定初始状态，管理员可以在页面上覆盖它。
+// 这是一个纯粹的「开 / 关」开关：管理员在「用户管理」页点一下，状态即定论。
+// 配置项 INVENTORY_ALLOW_REGISTRATION 只在「从未在页面上设置过」时生效，
+// 也就是首次部署时的初始状态；页面上一旦做出选择，就以那个选择为准。
 // ---------------------------------------------------------------------------
 
 // usersPath 是用户管理页地址，开关操作完成后回到这里。
 const usersPath = "/users"
-
-// 注册开关表单支持的动作。
-const (
-	registrationActionSet   = "set"   // 写入指定状态（enabled=true / false）
-	registrationActionReset = "reset" // 删除页面设置，回到环境变量默认值
-)
 
 // RegistrationRefreshInterval 是后台同步开关取值的间隔。
 //
@@ -152,7 +146,7 @@ func (h *Handler) RegistrationStatus() (enabled, explicit bool) {
 // 重复提交、或在另一个标签页里已经改过的情况下，结果依然可预期 ——
 // 「切换」语义的按钮会让并发操作互相打架。
 //
-// 参数解析刻意严格：字段缺失、取值非法、动作未知都直接拒绝。
+// 参数解析刻意严格：字段缺失、取值非法都直接拒绝。
 // 若沿用 formBool「读不到就当 false」的习惯，一次畸形请求就会变成
 // 「静默关闭注册」—— 一个安全相关的开关不该有这种失败方式。
 func (h *Handler) UserRegistrationToggle(w http.ResponseWriter, r *http.Request) {
@@ -167,52 +161,26 @@ func (h *Handler) UserRegistrationToggle(w http.ResponseWriter, r *http.Request)
 	ctx := r.Context()
 	actor := h.currentUser(r).Username
 
-	action := formString(r, "action")
-	if action == "" {
-		action = registrationActionSet
-	}
-
-	switch action {
-	case registrationActionSet:
-		enable, err := strconv.ParseBool(formString(r, "enabled"))
-		if err != nil {
-			h.logger.Warn("注册开关请求参数不合法",
-				"enabled", r.FormValue("enabled"), "操作人", actor)
-			h.redirectWith(w, r, usersPath, "error", "请求参数不正确，请刷新页面后重试")
-			return
-		}
-
-		if err := h.store.SetRegistrationEnabled(ctx, enable); err != nil {
-			h.logger.Error("保存自助注册开关失败", "错误", err, "操作人", actor)
-			h.redirectWith(w, r, usersPath, "error", "保存自助注册开关失败，请稍后重试")
-			return
-		}
-		// 写入成功后直接回填缓存，管理员点完立刻看到新状态。
-		// 这里信任写入值而不是回读：SetSetting 落库的就是 strconv.FormatBool(enable)，
-		// 回读只会得到同一个布尔值，白搭一次查询。
-		h.registration.put(services.RegistrationState{Enabled: enable, Explicit: true})
-
-		h.logger.Info("管理员调整了自助注册开关", "状态", registrationWord(enable), "操作人", actor)
-		h.redirectWith(w, r, usersPath, "success", "已"+registrationWord(enable)+"自助注册")
-
-	case registrationActionReset:
-		if err := h.store.ResetRegistrationSetting(ctx); err != nil {
-			h.logger.Error("恢复自助注册默认设置失败", "错误", err, "操作人", actor)
-			h.redirectWith(w, r, usersPath, "error", "恢复默认设置失败，请稍后重试")
-			return
-		}
-		enabled := h.registrationDefault()
-		h.registration.put(services.RegistrationState{Enabled: enabled})
-
-		h.logger.Info("自助注册开关已恢复为环境变量默认值",
-			"状态", registrationWord(enabled), "操作人", actor)
-		h.redirectWith(w, r, usersPath, "success",
-			"已恢复为环境变量默认值（当前"+registrationWord(enabled)+"）")
-
-	default:
-		h.logger.Warn("收到未知的注册开关动作", "action", action, "操作人", actor)
+	enable, err := strconv.ParseBool(formString(r, "enabled"))
+	if err != nil {
+		h.logger.Warn("注册开关请求参数不合法",
+			"enabled", r.FormValue("enabled"), "操作人", actor)
 		h.redirectWith(w, r, usersPath, "error", "请求参数不正确，请刷新页面后重试")
+		return
 	}
+
+	if err := h.store.SetRegistrationEnabled(ctx, enable); err != nil {
+		h.logger.Error("保存自助注册开关失败", "错误", err, "操作人", actor)
+		h.redirectWith(w, r, usersPath, "error", "保存自助注册开关失败，请稍后重试")
+		return
+	}
+	// 写入成功后直接回填缓存，管理员点完立刻看到新状态。
+	// 这里信任写入值而不是回读：SetSetting 落库的就是 strconv.FormatBool(enable)，
+	// 回读只会得到同一个布尔值，白搭一次查询。
+	h.registration.put(services.RegistrationState{Enabled: enable, Explicit: true})
+
+	h.logger.Info("管理员调整了自助注册开关", "状态", registrationWord(enable), "操作人", actor)
+	h.redirectWith(w, r, usersPath, "success", "已"+registrationWord(enable)+"自助注册")
 }
 
 // registrationWord 把开关状态转成中文，供提示与日志复用。
@@ -224,9 +192,10 @@ func registrationWord(enabled bool) string {
 }
 
 // registrationPageData 组装「用户管理」页里自助注册卡片需要的数据。
+//
+// 只暴露 Enabled：卡片呈现的就是一个二值开关，没有「当前取值来自哪一边」
+// 这第三种状态需要向管理员解释。
 func (h *Handler) registrationPageData() map[string]any {
-	enabled, explicit := h.RegistrationStatus()
-
 	// 自助注册用户的默认角色由配置决定，卡片上如实说明，
 	// 免得管理员以为新注册的人会直接拿到可写权限。
 	role := models.Role(h.cfg.DefaultRole)
@@ -235,9 +204,7 @@ func (h *Handler) registrationPageData() map[string]any {
 	}
 
 	return map[string]any{
-		"Enabled":     enabled,
-		"Explicit":    explicit,
-		"EnvDefault":  h.cfg.AllowRegistration,
+		"Enabled":     h.AllowRegistration(),
 		"DefaultRole": role.Label(),
 	}
 }

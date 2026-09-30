@@ -21,7 +21,7 @@ func TestRegistrationStateFallsBackToDefault(t *testing.T) {
 			t.Errorf("未设置时 Enabled = %v，期望回落到默认值 %v", st.Enabled, fallback)
 		}
 		if st.Explicit {
-			t.Error("未设置时 Explicit 应为 false，界面才会提示「跟随环境变量」")
+			t.Error("未设置时 Explicit 应为 false —— 取值来自环境变量给出的初始状态")
 		}
 	}
 }
@@ -62,8 +62,9 @@ func TestRegistrationSettingOverridesDefault(t *testing.T) {
 	}
 }
 
-// 反复写入不应报错（走 upsert），恢复默认后应回到环境变量取值。
-func TestRegistrationSettingIsIdempotentAndResettable(t *testing.T) {
+// 反复写入不应报错（走 upsert），且最后一次写入就是最终状态 ——
+// 开关只有「开」和「关」两态，没有能把它交还给环境变量的第三态。
+func TestRegistrationSettingIsIdempotent(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()
 
@@ -73,24 +74,27 @@ func TestRegistrationSettingIsIdempotentAndResettable(t *testing.T) {
 		}
 	}
 
-	if err := store.ResetRegistrationSetting(ctx); err != nil {
-		t.Fatalf("恢复默认设置失败: %v", err)
-	}
-
 	st, err := store.RegistrationState(ctx, false)
 	if err != nil {
 		t.Fatalf("读取注册开关失败: %v", err)
 	}
-	if st.Enabled {
-		t.Error("恢复默认后应回到环境变量取值（关闭），实际仍为开启")
-	}
-	if st.Explicit {
-		t.Error("恢复默认后 Explicit 应为 false")
+	if !st.Enabled || !st.Explicit {
+		t.Errorf("重复写入后应仍为开启的显式设置，实际 Enabled=%v Explicit=%v", st.Enabled, st.Explicit)
 	}
 
-	// 幂等：键本就不存在时再删一次不应报错。
-	if err := store.ResetRegistrationSetting(ctx); err != nil {
-		t.Errorf("重复恢复默认设置不应报错: %v", err)
+	// 再关一次：结果必须是关，而不能被环境变量默认值 true 翻回去。
+	if err := store.SetRegistrationEnabled(ctx, false); err != nil {
+		t.Fatalf("关闭注册开关失败: %v", err)
+	}
+	st, err = store.RegistrationState(ctx, true)
+	if err != nil {
+		t.Fatalf("读取注册开关失败: %v", err)
+	}
+	if st.Enabled {
+		t.Error("页面上关闭后不应被环境变量的 true 翻回去")
+	}
+	if !st.Explicit {
+		t.Error("关闭同样是一次明确的设置，Explicit 应为 true")
 	}
 }
 
@@ -115,7 +119,7 @@ func TestRegistrationStateToleratesCorruptValue(t *testing.T) {
 		t.Error("坏值应回落到默认值 true，而不是猜成关闭")
 	}
 	if st.Explicit {
-		t.Error("坏值不应被当作显式设置，否则界面会显示一个不可信的来源")
+		t.Error("坏值不应被当作显式设置，否则日志会报出一个不可信的取值来源")
 	}
 }
 

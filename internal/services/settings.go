@@ -16,8 +16,9 @@ import (
 // 之所以不直接用环境变量：环境变量要改就得登服务器改配置再重启服务，
 // 而这类开关的调整时机往往就是管理员在页面上看到问题的那一刻。
 //
-// 取值优先级约定：settings 表中的显式设置 > 配置项（环境变量）默认值。
-// 即环境变量决定「初始状态」，管理员可以在页面上覆盖它。
+// 取值优先级约定：settings 表中的设置 > 配置项（环境变量）默认值。
+// 环境变量只在「从未在页面上设置过」时生效（即首次部署的初始状态）；
+// 管理员一旦在页面上做过选择，那个选择就是唯一的取值来源，不会再被环境变量翻回去。
 // 这不会带来额外的权限提升 —— 能进入用户管理页的管理员本来就能直接建号。
 // ---------------------------------------------------------------------------
 
@@ -51,23 +52,14 @@ func (s *Store) SetSetting(ctx context.Context, key, value string) error {
 	return nil
 }
 
-// DeleteSetting 删除一项系统设置，使其回落到配置项默认值。
-// 键本来就不存在时不算错误（幂等）。
-func (s *Store) DeleteSetting(ctx context.Context, key string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM settings WHERE key = ?`, key); err != nil {
-		return fmt.Errorf("删除设置 %s 失败: %w", key, err)
-	}
-	return nil
-}
-
 // RegistrationState 描述「是否开放自助注册」的当前状态及其来源。
 type RegistrationState struct {
 	// Enabled 是最终生效的取值。
 	Enabled bool
 
 	// Explicit 为 true 表示取值来自管理员在页面上的设置；
-	// 为 false 表示尚未在页面上设置过，取值跟随配置项默认值。
-	// 界面据此提示「当前跟随环境变量」，并决定是否显示「恢复默认」。
+	// 为 false 表示尚未在页面上设置过，取值跟随配置项默认值（首次部署的初始状态）。
+	// 界面只呈现 Enabled 这一个结果，Explicit 供启动日志说明取值来源。
 	Explicit bool
 }
 
@@ -99,11 +91,9 @@ func (s *Store) RegistrationState(ctx context.Context, fallback bool) (Registrat
 }
 
 // SetRegistrationEnabled 持久化自助注册开关，之后不再受配置项默认值影响。
+//
+// 开关只有「开」和「关」两种取值，没有第三种「交还给环境变量」的状态 ——
+// 写入即定论，避免页面上出现「我到底设没设过」这种说不清的情况。
 func (s *Store) SetRegistrationEnabled(ctx context.Context, enabled bool) error {
 	return s.SetSetting(ctx, SettingAllowRegistration, strconv.FormatBool(enabled))
-}
-
-// ResetRegistrationSetting 删除页面上的设置，让开关回到配置项默认值。
-func (s *Store) ResetRegistrationSetting(ctx context.Context) error {
-	return s.DeleteSetting(ctx, SettingAllowRegistration)
 }
