@@ -1,10 +1,6 @@
 # 库存管理系统 (Inventory System)
 
-![CI](https://github.com/jinhuaitao/inventory/actions/workflows/ci.yml/badge.svg)
-
-![Go Version](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go)
-
-![License](https://img.shields.io/badge/License-MIT-blue.svg)
+![CI](https://github.com/jinhuaitao/inventory/actions/workflows/ci.yml/badge.svg) ![Go Version](https://img.shields.io/badge/Go-1.27-00ADD8?logo=go) ![License](https://img.shields.io/badge/License-MIT-blue.svg)
 
 一个用 **Go 语言** 编写的、功能完善的库存管理系统。使用 **SQLite** 存储数据、**服务端渲染 HTML** 呈现界面，编译后是**单个可执行文件**，无需任何外部依赖即可运行。
 
