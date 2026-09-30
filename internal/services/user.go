@@ -192,7 +192,7 @@ func (s *Store) UpdateProfile(ctx context.Context, userID int64, fullName, email
 	if !utils.IsValidEmail(email) {
 		return fmt.Errorf("%w：邮箱格式不正确", ErrInvalidInput)
 	}
-	_, err := s.db.ExecContext(ctx,
+	res, err := s.db.ExecContext(ctx,
 		`UPDATE users SET full_name = ?, email = ?, updated_at = ? WHERE id = ?`,
 		strings.TrimSpace(fullName), email, nowUTC(), userID)
 	if err != nil {
@@ -200,6 +200,15 @@ func (s *Store) UpdateProfile(ctx context.Context, userID int64, fullName, email
 			return conflictError(uniqueField(err))
 		}
 		return fmt.Errorf("更新资料失败: %w", err)
+	}
+	n, err := rowsAffected(res)
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		// 用户已不存在（例如刚被管理员删除）。不检查的话这里会返回 nil，
+		// 页面提示「资料已更新」，实际上一行都没改 —— 这类假成功最难排查。
+		return ErrNotFound
 	}
 	return nil
 }
@@ -245,7 +254,7 @@ func (s *Store) UpdateUserByAdmin(ctx context.Context, userID int64, in AdminUpd
 	}
 
 	now := nowUTC()
-	_, err = s.db.ExecContext(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		UPDATE users SET full_name = ?, email = ?, role = ?, status = ?, updated_at = ?
 		WHERE id = ?`,
 		strings.TrimSpace(in.FullName), in.Email, string(in.Role), in.Status, now, userID)
@@ -254,6 +263,14 @@ func (s *Store) UpdateUserByAdmin(ctx context.Context, userID int64, in AdminUpd
 			return conflictError(uniqueField(err))
 		}
 		return fmt.Errorf("更新用户失败: %w", err)
+	}
+	// GetUserByID 已确认目标存在，正常情况下必为 1 行；
+	// 仍然检查一次，是为了让「用户恰好被并发删除」暴露成 ErrNotFound，
+	// 而不是静默返回一个「改成功了」的假象。
+	if n, err := rowsAffected(res); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrNotFound
 	}
 
 	if strings.TrimSpace(in.Password) != "" {
@@ -310,6 +327,15 @@ func (s *Store) TouchLastLogin(ctx context.Context, userID int64) error {
 
 // SetUserStatus 启用 / 禁用账号。
 func (s *Store) SetUserStatus(ctx context.Context, userID int64, status string) error {
+	// 状态必须落在白名单内。这个函数会把参数原样写进 status 列，
+	// 而登录鉴权只认 active —— 放任意字符串进来，一次畸形请求就能把账号
+	// 改成「既不是 active 也不是 disabled」的状态，账号从此登不上，
+	// 界面上的「启用」按钮也救不回来（它写的是 active，看似生效却对不上语义）。
+	if status != models.UserStatusActive && status != models.UserStatusDisabled {
+		return fmt.Errorf("%w：状态不合法（可选 %s / %s）",
+			ErrInvalidInput, models.UserStatusActive, models.UserStatusDisabled)
+	}
+
 	u, err := s.GetUserByID(ctx, userID)
 	if err != nil {
 		return err
@@ -323,10 +349,15 @@ func (s *Store) SetUserStatus(ctx context.Context, userID int64, status string) 
 			return ErrLastAdmin
 		}
 	}
-	_, err = s.db.ExecContext(ctx,
+	res, err := s.db.ExecContext(ctx,
 		`UPDATE users SET status = ?, updated_at = ? WHERE id = ?`, status, nowUTC(), userID)
 	if err != nil {
 		return fmt.Errorf("更新用户状态失败: %w", err)
+	}
+	if n, err := rowsAffected(res); err != nil {
+		return err
+	} else if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }

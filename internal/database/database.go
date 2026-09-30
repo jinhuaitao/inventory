@@ -54,7 +54,6 @@ func Open(path string) (*sql.DB, error) {
 
 // buildDSN 拼装 modernc.org/sqlite 的 DSN，开启 WAL、外键与忙等待。
 func buildDSN(path string) string {
-	p := filepath.ToSlash(path)
 	params := []string{
 		"_pragma=busy_timeout(5000)",
 		"_pragma=journal_mode(WAL)",
@@ -63,11 +62,41 @@ func buildDSN(path string) string {
 		// 事务一开启就获取写锁，避免「读后升级为写」导致的 SQLITE_BUSY 死锁
 		"_txlock=immediate",
 	}
-	sep := "?"
-	if strings.Contains(p, "?") {
-		sep = "&"
+	return "file:" + encodeDSNPath(filepath.ToSlash(path)) + "?" + strings.Join(params, "&")
+}
+
+// encodeDSNPath 对路径里的 URI 保留字符做百分号编码。
+//
+// DSN 的形状是 file:<路径>?<参数>，所以路径里一旦出现 `?` 或 `#`，
+// 后面的一切都会被当成查询串 / 片段：五个 _pragma 与 _txlock 全部失效，
+// 数据库会以「没有 WAL、没有外键、没有忙等待」的默认姿态被打开 ——
+// 程序自己毫无察觉，直到某天发现外键约束根本没生效。
+// `%` 也要编码，否则会被当成转义序列的开头。
+//
+// 早先的写法是「路径里含 ? 就把分隔符换成 &」，那只是把参数拼在了
+// 一个更长的查询串后面，参数名早已被污染，等于没修。
+func encodeDSNPath(p string) string {
+	const hexDigits = "0123456789ABCDEF"
+
+	// 绝大多数路径不含这些字符，先扫一遍避免无谓的分配。
+	if !strings.ContainsAny(p, "?#%") {
+		return p
 	}
-	return "file:" + p + sep + strings.Join(params, "&")
+
+	var b strings.Builder
+	b.Grow(len(p) + 8)
+	for i := 0; i < len(p); i++ {
+		c := p[i]
+		switch c {
+		case '?', '#', '%':
+			b.WriteByte('%')
+			b.WriteByte(hexDigits[c>>4])
+			b.WriteByte(hexDigits[c&0x0f])
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
 }
 
 // demoFlagColumn 标记由内置演示数据写入的行，使清理不必依赖名称猜测。
@@ -100,6 +129,161 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		if err := ensureColumn(ctx, db, table, "blocked", ddl); err != nil {
 			return err
 		}
+	}
+
+	// 收紧库存流水的外键：早期版本把它们写成了 CASCADE / SET NULL，
+	// 而 CREATE TABLE IF NOT EXISTS 对已存在的表不做任何事，必须显式迁移。
+	if err := enforceMovementForeignKeys(ctx, db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// movementForeignKeys 描述 stock_movements 上应有的外键行为。
+//
+// 见 schema.sql 里 stock_movements 的注释：审计流水的两个外键必须是 RESTRICT，
+// 否则删除商品 / 供应商会连带改写历史记录。
+var movementForeignKeys = []struct {
+	column   string
+	onDelete string
+}{
+	{"product_id", "RESTRICT"},
+	{"supplier_id", "RESTRICT"},
+}
+
+// enforceMovementForeignKeys 把旧库里 stock_movements 的外键收敛到 RESTRICT。
+//
+// 早期版本把 product_id 定义成 ON DELETE CASCADE、supplier_id 定义成
+// ON DELETE SET NULL，两者都会在删除主表行时**改写历史流水**。
+// 而 CREATE TABLE IF NOT EXISTS 对**已存在**的表不做任何事 ——
+// 只改 schema.sql 对老库完全无效，SQLite 又不支持 ALTER TABLE 改外键，
+// 只能按官方推荐的流程把整张表重建一遍。
+func enforceMovementForeignKeys(ctx context.Context, db *sql.DB) error {
+	needsRebuild := false
+	for _, fk := range movementForeignKeys {
+		got, err := movementForeignKeyOnDelete(ctx, db, fk.column)
+		if err != nil {
+			return err
+		}
+		// 空串表示该列上根本没有外键（比早期版本更老的库），一并补上。
+		if got == "" || !strings.EqualFold(got, fk.onDelete) {
+			needsRebuild = true
+			break
+		}
+	}
+	if !needsRebuild {
+		return nil
+	}
+
+	// 重建过程会逐行校验外键，孤儿流水会让它直接失败。
+	// 与其让服务带着「启动即崩溃」的谜题，不如先把问题说清楚。
+	orphans, err := countOrphanMovements(ctx, db)
+	if err != nil {
+		return err
+	}
+	if orphans > 0 {
+		return fmt.Errorf(
+			"数据库中有 %d 条库存流水指向已不存在的商品 / 供应商 / 操作人，无法收紧外键约束。"+
+				"请先用 SELECT * FROM stock_movements WHERE product_id NOT IN (SELECT id FROM products) "+
+				"OR (supplier_id IS NOT NULL AND supplier_id NOT IN (SELECT id FROM suppliers)) "+
+				"OR operator_id NOT IN (SELECT id FROM users) 核对这些记录，处理后再启动",
+			orphans)
+	}
+	return rebuildStockMovements(ctx, db)
+}
+
+// movementForeignKeyOnDelete 读取 stock_movements 指定列外键的 ON DELETE 行为，
+// 没有对应外键时返回空串。
+func movementForeignKeyOnDelete(ctx context.Context, db *sql.DB, column string) (string, error) {
+	rows, err := db.QueryContext(ctx, `PRAGMA foreign_key_list(stock_movements)`)
+	if err != nil {
+		return "", fmt.Errorf("读取 stock_movements 外键定义失败: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			id, seq                   int
+			table, from, to           sql.NullString
+			onUpdate, onDelete, match sql.NullString
+		)
+		if err := rows.Scan(&id, &seq, &table, &from, &to, &onUpdate, &onDelete, &match); err != nil {
+			return "", fmt.Errorf("解析 stock_movements 外键定义失败: %w", err)
+		}
+		if from.String == column {
+			return strings.ToUpper(onDelete.String), nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	return "", nil
+}
+
+// countOrphanMovements 统计指向已删除主表行的库存流水条数。
+func countOrphanMovements(ctx context.Context, db *sql.DB) (int, error) {
+	var n int
+	err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*) FROM stock_movements
+		 WHERE product_id NOT IN (SELECT id FROM products)
+			OR (supplier_id IS NOT NULL AND supplier_id NOT IN (SELECT id FROM suppliers))
+			OR operator_id NOT IN (SELECT id FROM users)`).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("检查孤儿流水失败: %w", err)
+	}
+	return n, nil
+}
+
+// rebuildStockMovements 按 SQLite 官方推荐的流程重建 stock_movements 表。
+func rebuildStockMovements(ctx context.Context, db *sql.DB) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开启重建事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	stmts := []string{
+		`CREATE TABLE stock_movements__migrate (
+			id          INTEGER PRIMARY KEY AUTOINCREMENT,
+			product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
+			type        TEXT    NOT NULL,
+			quantity    INTEGER NOT NULL,
+			delta       INTEGER NOT NULL,
+			unit_price  REAL    NOT NULL DEFAULT 0,
+			before_qty  INTEGER NOT NULL DEFAULT 0,
+			after_qty   INTEGER NOT NULL DEFAULT 0,
+			ref_no      TEXT    NOT NULL DEFAULT '',
+			supplier_id INTEGER REFERENCES suppliers(id) ON DELETE RESTRICT,
+			operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+			note        TEXT    NOT NULL DEFAULT '',
+			created_at  DATETIME NOT NULL
+		)`,
+		// 显式列出列而不是 SELECT *：两边列序必须严格对齐，
+		// 靠星号拼运气的话，将来加一列就会张冠李戴。
+		`INSERT INTO stock_movements__migrate
+			(id, product_id, type, quantity, delta, unit_price, before_qty, after_qty,
+			 ref_no, supplier_id, operator_id, note, created_at)
+		 SELECT id, product_id, type, quantity, delta, unit_price, before_qty, after_qty,
+		        ref_no, supplier_id, operator_id, note, created_at
+		   FROM stock_movements`,
+		`DROP TABLE stock_movements`,
+		`ALTER TABLE stock_movements__migrate RENAME TO stock_movements`,
+		`CREATE INDEX IF NOT EXISTS idx_movements_product  ON stock_movements(product_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_movements_type     ON stock_movements(type)`,
+		`CREATE INDEX IF NOT EXISTS idx_movements_created  ON stock_movements(created_at)`,
+		`CREATE INDEX IF NOT EXISTS idx_movements_operator ON stock_movements(operator_id)`,
+		// DROP TABLE 会连 sqlite_sequence 里的自增计数一起清掉，
+		// 不补回去的话下一条流水可能拿到一个已被用过的 id。
+		`INSERT OR REPLACE INTO sqlite_sequence(name, seq)
+		 SELECT 'stock_movements', COALESCE(MAX(id), 0) FROM stock_movements`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("重建 stock_movements 失败: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交 stock_movements 重建失败: %w", err)
 	}
 	return nil
 }
@@ -172,28 +356,44 @@ func Seed(ctx context.Context, db *sql.DB, opts SeedOptions, logger *slog.Logger
 
 // seedAdmin 若系统中尚无任何用户，则创建默认管理员账号。
 func seedAdmin(ctx context.Context, db *sql.DB, opts SeedOptions, logger *slog.Logger) (bool, error) {
+	// bcrypt 要几十毫秒，先算好再进事务 —— 放进事务里等于一直占着写锁。
+	hash, err := bcrypt.GenerateFromPassword([]byte(opts.AdminPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return false, fmt.Errorf("生成管理员密码失败: %w", err)
+	}
+
+	// 「统计用户数」与「插入管理员」必须在同一个事务里完成。
+	// 拆成两条独立语句的话，两个进程同时启动（多实例部署、或 systemd 快速重启）
+	// 都会读到 count=0，然后一起插入：第二个撞上 username 唯一约束，
+	// Seed 直接报错，服务**起不来** —— 而且只在并发启动时复现，极难排查。
+	// DSN 里的 _txlock=immediate 保证事务一开启就拿到写锁，
+	// 后到的那个会在锁上排队，进去时 count 已经是 1。
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
 	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&count); err != nil {
 		return false, fmt.Errorf("统计用户数量失败: %w", err)
 	}
 	if count > 0 {
 		return false, nil
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(opts.AdminPassword), bcrypt.DefaultCost)
-	if err != nil {
-		return false, fmt.Errorf("生成管理员密码失败: %w", err)
-	}
-
 	now := time.Now().UTC()
-	_, err = db.ExecContext(ctx, `
+	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO users (username, email, password_hash, full_name, role, status, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		opts.AdminUsername, opts.AdminEmail, string(hash), "系统管理员",
 		string(models.RoleAdmin), models.UserStatusActive, now, now,
-	)
-	if err != nil {
+	); err != nil {
 		return false, fmt.Errorf("创建默认管理员失败: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("提交事务失败: %w", err)
 	}
 
 	if logger != nil {
@@ -298,19 +498,22 @@ func demoOperatorID(ctx context.Context, tx *sql.Tx) (int64, error) {
 // seedDemoData 仅在数据库为空时写入一组演示数据，便于首次体验。
 // 所有写入的行都会打上 is_demo 标记，方便日后用 PurgeDemoData 精确清理。
 func seedDemoData(ctx context.Context, db *sql.DB, logger *slog.Logger) error {
-	var count int
-	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM products`).Scan(&count); err != nil {
-		return fmt.Errorf("统计商品数量失败: %w", err)
-	}
-	if count > 0 {
-		return nil
-	}
-
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+
+	// 判空与写入必须在同一个事务里。分开写的话，并发启动的两个进程
+	// 都会看到「一件商品都没有」，然后各写一套演示数据 ——
+	// 分类名、供应商名都带唯一约束，第二个进程必然报错并让服务起不来。
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM products`).Scan(&count); err != nil {
+		return fmt.Errorf("统计商品数量失败: %w", err)
+	}
+	if count > 0 {
+		return nil
+	}
 
 	now := time.Now().UTC()
 

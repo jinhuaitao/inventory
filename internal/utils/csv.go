@@ -57,16 +57,27 @@ func sanitizeRow(row []string) []string {
 // 前置一个单引号即可让表格软件按纯文本处理。
 // 纯数字（含负数、小数）除外 —— 否则 `-5` 会被写成 `'-5`，
 // 导出后变成文本，排序与求和都会失效。
+//
+// ⚠️ 判定必须先剥掉前导空白：表格软件在判断「是不是公式」时同样会
+// 忽略前导空白，只看 s[0] 的话 " =HYPERLINK(...)"、" \t+1+1" 这类
+// 载荷会走 default 分支原样导出，而打开时照样被当公式求值 ——
+// 等于防护形同虚设。负数的 ParseFloat 也要用剥过空白的值，
+// 否则 " -5" 会被误判成公式而写成文本。
 func CSVSafe(s string) string {
 	if s == "" {
 		return s
 	}
-	switch s[0] {
-	case '=', '+', '@', '\t', '\r':
+	trimmed := strings.TrimLeft(s, " \t\r\n\v\f")
+	if trimmed == "" {
+		// 整格都是空白：剥掉之后无内容可求值，保持原样即可
+		return s
+	}
+	switch trimmed[0] {
+	case '=', '+', '@':
 		// 一律转义
 	case '-':
 		// 负数是最常见的「危险前缀」，必须放行
-		if _, err := strconv.ParseFloat(strings.TrimSpace(s), 64); err == nil {
+		if _, err := strconv.ParseFloat(trimmed, 64); err == nil {
 			return s
 		}
 	default:

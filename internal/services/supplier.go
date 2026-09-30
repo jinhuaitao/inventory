@@ -204,14 +204,38 @@ func (s *Store) UpdateSupplier(ctx context.Context, id int64, in SupplierInput) 
 }
 
 // DeleteSupplier 删除供应商，返回受影响商品数（商品的供应商字段会被置空）。
+//
+// 该供应商只要出现在任何一条库存流水里就拒绝删除。
+// 早期 schema 把 stock_movements.supplier_id 定义成 ON DELETE SET NULL，
+// 于是删掉一个供应商会把**全部历史入库单**上的供应商字段抹成空 ——
+// 采购记录瞬间失去出处，而这与「有流水的商品不许删」的审计约定自相矛盾。
+// 外键已收紧为 RESTRICT，这里在应用层先查一次，是为了给出可读的提示。
+//
+// 与 DeleteProduct 同理，统计与删除必须在同一事务内完成，避免竞态。
 func (s *Store) DeleteSupplier(ctx context.Context, id int64) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
+	var movements int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM stock_movements WHERE supplier_id = ?`, id).Scan(&movements); err != nil {
+		return 0, fmt.Errorf("统计关联流水失败: %w", err)
+	}
+	if movements > 0 {
+		return 0, fmt.Errorf("%w：该供应商已出现在 %d 条库存流水里，"+
+			"删除会抹掉历史记录的出处，请改为停用或保留", ErrInvalidInput, movements)
+	}
+
 	var affected int64
-	if err := s.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM products WHERE supplier_id = ?`, id).Scan(&affected); err != nil {
 		return 0, fmt.Errorf("统计关联商品失败: %w", err)
 	}
 
-	res, err := s.db.ExecContext(ctx, `DELETE FROM suppliers WHERE id = ?`, id)
+	res, err := tx.ExecContext(ctx, `DELETE FROM suppliers WHERE id = ?`, id)
 	if err != nil {
 		return 0, fmt.Errorf("删除供应商失败: %w", err)
 	}
@@ -221,6 +245,9 @@ func (s *Store) DeleteSupplier(ctx context.Context, id int64) (int64, error) {
 	}
 	if n == 0 {
 		return 0, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("提交事务失败: %w", err)
 	}
 	return affected, nil
 }

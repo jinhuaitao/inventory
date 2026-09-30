@@ -173,14 +173,23 @@ func (s *Store) UpdateCategory(ctx context.Context, id int64, name, description 
 }
 
 // DeleteCategory 删除分类；关联商品的分类字段会被置空（外键 ON DELETE SET NULL）。
+//
+// 统计与删除放在同一事务里，否则返回的「受影响商品数」可能是删除前的旧值，
+// 界面据此提示用户的数字就对不上。
 func (s *Store) DeleteCategory(ctx context.Context, id int64) (int64, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
 	var affected int64
-	if err := s.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM products WHERE category_id = ?`, id).Scan(&affected); err != nil {
 		return 0, fmt.Errorf("统计关联商品失败: %w", err)
 	}
 
-	res, err := s.db.ExecContext(ctx, `DELETE FROM categories WHERE id = ?`, id)
+	res, err := tx.ExecContext(ctx, `DELETE FROM categories WHERE id = ?`, id)
 	if err != nil {
 		return 0, fmt.Errorf("删除分类失败: %w", err)
 	}
@@ -190,6 +199,9 @@ func (s *Store) DeleteCategory(ctx context.Context, id int64) (int64, error) {
 	}
 	if n == 0 {
 		return 0, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("提交事务失败: %w", err)
 	}
 	return affected, nil
 }

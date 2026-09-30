@@ -139,9 +139,18 @@ CREATE INDEX IF NOT EXISTS idx_products_barcode  ON products(barcode);
 -- 库存流水
 -- ---------------------------------------------------------------------------
 
+-- stock_movements 是本系统的审计记录，约定是「有流水的商品 / 供应商不许删」。
+--
+-- 两个外键一律用 RESTRICT（而不是 CASCADE / SET NULL），因为后两者都会在
+-- 删除主表行时**改写历史流水**：
+--   CASCADE   —— 商品一删，它的全部流水跟着消失，账直接对不上；
+--   SET NULL  —— 供应商一删，历史入库单上的供应商被抹成空。
+-- 应用层的 DeleteProduct / DeleteSupplier 虽然会先查引用再删，但那终究是
+-- 「查」与「删」两条语句，中间存在竞态窗口，也拦不住绕过该层的操作。
+-- 让数据库来做最后一道把关，才是真正的保险。
 CREATE TABLE IF NOT EXISTS stock_movements (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE CASCADE,
+    product_id  INTEGER NOT NULL REFERENCES products(id) ON DELETE RESTRICT,
     type        TEXT    NOT NULL,
     quantity    INTEGER NOT NULL,
     delta       INTEGER NOT NULL,
@@ -149,7 +158,7 @@ CREATE TABLE IF NOT EXISTS stock_movements (
     before_qty  INTEGER NOT NULL DEFAULT 0,
     after_qty   INTEGER NOT NULL DEFAULT 0,
     ref_no      TEXT    NOT NULL DEFAULT '',
-    supplier_id INTEGER REFERENCES suppliers(id) ON DELETE SET NULL,
+    supplier_id INTEGER REFERENCES suppliers(id) ON DELETE RESTRICT,
     operator_id INTEGER NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
     note        TEXT    NOT NULL DEFAULT '',
     created_at  DATETIME NOT NULL

@@ -95,3 +95,35 @@ func TestTruncateUnicode(t *testing.T) {
 		t.Error("截断结果长度不正确")
 	}
 }
+
+// TestTruncateHandlesNonPositiveMax 锁死「非正数上限不 panic」。
+//
+// 早先 max <= 0 时会走到 runes[:max]，负数下标直接 panic。
+// 一个格式化辅助函数不该把调用方的参数错误升级成整个请求崩掉 ——
+// 截断到「零个字符」，返回空串才是合理语义。
+func TestTruncateHandlesNonPositiveMax(t *testing.T) {
+	for _, max := range []int{0, -1, -100} {
+		got := Truncate("中文测试字符串", max)
+		if got != "" {
+			t.Errorf("Truncate(s, %d) = %q，期望空串", max, got)
+		}
+	}
+	// 空串输入同样不能出问题
+	if got := Truncate("", -1); got != "" {
+		t.Errorf("Truncate(\"\", -1) = %q，期望空串", got)
+	}
+}
+
+// TestTruncateBoundaries 边界：max=1 只留一个字符且不加省略号。
+func TestTruncateBoundaries(t *testing.T) {
+	if got := Truncate("abc", 1); got != "a" {
+		t.Errorf("Truncate(\"abc\", 1) = %q，期望 a", got)
+	}
+	if got := Truncate("abc", 2); got != "a…" {
+		t.Errorf("Truncate(\"abc\", 2) = %q，期望 a…", got)
+	}
+	// 长度恰好等于上限时原样返回，不加省略号
+	if got := Truncate("abc", 3); got != "abc" {
+		t.Errorf("Truncate(\"abc\", 3) = %q，期望 abc", got)
+	}
+}

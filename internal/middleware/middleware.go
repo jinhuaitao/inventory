@@ -176,10 +176,41 @@ func SecurityHeaders(cfg *config.Config) Middleware {
 // 会话与权限
 // ---------------------------------------------------------------------------
 
+// skipsSessionLoad 报告该路径是否可以跳过会话加载。
+//
+// 静态资源与运维探针被排除在外，有两个理由：
+//
+//  1. 静态资源是浏览器同源请求，会自动带上会话 cookie。逐个文件去查
+//     sessions 表纯属浪费 —— 一个页面十几个资源就是十几次查询，
+//     而它们的响应内容与「你是谁」毫无关系。
+//
+//  2. /healthz 是**存活**探针，语义是「进程还能响应吗」。让它依赖数据库，
+//     数据库一抖动（哪怕只是短暂锁等待），编排系统就会判定进程已死并重启，
+//     把一个本可自愈的故障放大成重启风暴。/readyz 仍然检查数据库 ——
+//     那才是它该管的事，而且检查写在 handler 里，比中间件更贴近语义。
+//
+// 这些路径上拿不到用户与 CSRF 令牌是安全的：它们全部是幂等的 GET，
+// 不经过 CSRF 校验，也不读取用户身份。
+func skipsSessionLoad(path string) bool {
+	if strings.HasPrefix(path, "/static/") {
+		return true
+	}
+	switch path {
+	case "/healthz", "/readyz", "/favicon.ico":
+		return true
+	}
+	return false
+}
+
 // Authenticate 加载会话并把用户与 CSRF 令牌注入上下文。
 // 未登录同样放行，由后续的 RequireAuth 决定是否拦截。
 func (m *Manager) Authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if skipsSessionLoad(r.URL.Path) {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		ctx := r.Context()
 
 		sess, user, err := m.sessions.Load(ctx, r)
@@ -354,25 +385,27 @@ func (m *Manager) CSRF(next http.Handler) http.Handler {
 			return
 		}
 
-		provided := r.Header.Get(auth.HeaderName)
-		if provided == "" {
-			// multipart 的体积上限必须在解析之前套上，否则超大请求会先落满
-			// 临时目录；解析本身交给 auth.ProvidedCSRFToken。
-			if auth.IsMultipartForm(r) {
-				// ⚠️ 本中间件跑在鉴权之前，而未登录的请求也可能带 multipart body。
-				// 若不做判断就交给 ParseMultipartForm，任何人都能用一次 512MB 的
-				// 上传（无需任何凭据）让服务端把数据完整落盘 —— 磁盘与 IO 直接被
-				// 打满，而 CSRF 校验失败是发生在解析**之后**的，拦不住。
-				// 站内所有 multipart 接口都要求登录，因此这里直接拒绝。
-				if sess == nil {
-					m.csrfFail(w, r, "请先登录后再上传")
-					return
-				}
-				r.Body = http.MaxBytesReader(w, r.Body, auth.MaxUploadBytes)
+		// ⚠️ multipart 的处理必须赶在取令牌之前，而且**与令牌从哪来无关**。
+		//
+		// 早先的写法把这段塞在「令牌来自表单字段」的分支里，于是客户端只要
+		// 改用 X-CSRF-Token 头提交令牌，就能整段绕过去：体积上限没了，
+		// 「未登录不许上传」的检查也跟着失效 —— 防护变成了「看客户端心情」。
+		// 这两件事保护的是请求解析本身，理应无条件执行。
+		if auth.IsMultipartForm(r) {
+			// 本中间件跑在鉴权之前，而未登录的请求也可能带 multipart body。
+			// 若不做判断就交给 ParseMultipartForm，任何人都能用一次 512MB 的
+			// 上传（无需任何凭据）让服务端把数据完整落盘 —— 磁盘与 IO 直接被
+			// 打满，而 CSRF 校验失败是发生在解析**之后**的，拦不住。
+			// 站内所有 multipart 接口都要求登录，因此这里直接拒绝。
+			if sess == nil {
+				m.csrfFail(w, r, "请先登录后再上传")
+				return
 			}
-			provided = auth.ProvidedCSRFToken(r)
+			// 体积上限必须在解析之前套上，否则超大请求会先落满临时目录。
+			r.Body = http.MaxBytesReader(w, r.Body, auth.MaxUploadBytes)
 		}
 
+		provided := auth.ProvidedCSRFToken(r)
 		if provided == "" || !utils.SecureCompare(provided, expected) {
 			m.csrfFail(w, r, "安全校验未通过，请刷新页面后重试")
 			return

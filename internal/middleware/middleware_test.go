@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -295,6 +296,98 @@ func TestCSRFRejectsUnauthenticatedMultipartBeforeParsing(t *testing.T) {
 	}
 }
 
+// TestCSRFRejectsUnauthenticatedMultipartWhenTokenComesFromHeader
+// 锁定「未登录 multipart 一律拒绝」这条约束**与令牌从哪来无关**。
+//
+// 修复前，这段判断被塞在「令牌取自表单字段」的分支里：客户端只要改成用
+// X-CSRF-Token 头提交令牌，就会整段跳过 —— 既绕开了体积上限，
+// 也绕开了登录检查，等于把防护交给了攻击者自己选。
+//
+// 与上面的用例一样，不能只看状态码，要用计数 reader 证明 body 没被读过。
+func TestCSRFRejectsUnauthenticatedMultipartWhenTokenComesFromHeader(t *testing.T) {
+	body, contentType := multipartBody(t, "", "backup", "inventory.db",
+		strings.Repeat("A", 1<<20))
+	// 注意：表单里**故意不写** _csrf —— 令牌只通过请求头提交，
+	// 这正是修复前能绕过检查的那条路径。
+
+	counting := &countingReader{r: body}
+	req := httptest.NewRequest(http.MethodPost, "/admin/maintenance/restore", counting)
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set(auth.HeaderName, "attacker-supplied-token")
+	// 故意不注入会话 —— 模拟匿名攻击者。
+
+	_, reached, chain := newChain(t)
+	rec := httptest.NewRecorder()
+	chain.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("未登录的 multipart 请求（令牌走请求头）应返回 403，实际 %d", rec.Code)
+	}
+	if *reached {
+		t.Fatal("未登录的 multipart 请求不应抵达后续 handler")
+	}
+	if counting.reads != 0 || counting.bytes != 0 {
+		t.Errorf("未登录的 multipart body 不应被读取，实际读取 %d 次 / %d 字节",
+			counting.reads, counting.bytes)
+	}
+}
+
+// TestCSRFAppliesBodyLimitToMultipartRegardlessOfTokenSource
+// 确认体积上限对 multipart **无条件**生效，不再取决于令牌的提交方式。
+//
+// 上限本身是 512MB，测试里没法真造一个超大 body，因此改为检查抵达
+// handler 时 r.Body 的类型：被 http.MaxBytesReader 包过之后，它不再是
+// 调用方传入的原始 reader。（若将来标准库换了内部类型名，这条用例会失败 ——
+// 那正是我们希望被看见的信号，而不是悄悄失去这道保护。）
+func TestCSRFAppliesBodyLimitToMultipartRegardlessOfTokenSource(t *testing.T) {
+	const token = "test-csrf-token"
+
+	for _, tc := range []struct {
+		name       string
+		fromHeader bool
+	}{
+		{"令牌走表单字段", false},
+		{"令牌走请求头", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := testManager()
+
+			var bodyType string
+			next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				bodyType = fmt.Sprintf("%T", r.Body)
+				w.WriteHeader(http.StatusOK)
+			})
+			chain := Chain(next, m.Authenticate, m.CSRF)
+
+			// 令牌走请求头时，表单里就不写 _csrf 字段（走另一条分支）
+			formToken := token
+			if tc.fromHeader {
+				formToken = ""
+			}
+			payload, contentType := multipartBody(t, formToken, "backup", "inventory.db", "payload")
+			req := httptest.NewRequest(http.MethodPost, "/admin/maintenance/restore", payload)
+			req.Header.Set("Content-Type", contentType)
+			req.AddCookie(&http.Cookie{Name: auth.CSRFCookieName, Value: token})
+			if tc.fromHeader {
+				req.Header.Set(auth.HeaderName, token)
+			}
+			req = req.WithContext(auth.WithSession(req.Context(),
+				&models.Session{CSRFToken: token}))
+
+			rec := httptest.NewRecorder()
+			chain.ServeHTTP(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("已登录且令牌正确时应放行，实际状态码 %d，响应体 %q",
+					rec.Code, rec.Body.String())
+			}
+			if !strings.Contains(bodyType, "maxBytesReader") {
+				t.Errorf("抵达 handler 时 r.Body 应为包过体积上限的 reader，实际类型 %q", bodyType)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // 其他提交方式不能被这次改动破坏
 // ---------------------------------------------------------------------------
@@ -423,4 +516,93 @@ func TestCSRFUsesSessionTokenWhenLoggedIn(t *testing.T) {
 	if rec := post(t, staleCookie); rec.Code != http.StatusForbidden {
 		t.Fatalf("仅 cookie 旧值匹配会话令牌时应返回 403，实际 %d", rec.Code)
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 探针与静态资源不应被会话加载拖累
+// ---------------------------------------------------------------------------
+
+// TestSkipsSessionLoad 锁定豁免路径的范围。
+func TestSkipsSessionLoad(t *testing.T) {
+	exempt := []string{
+		"/healthz", "/readyz", "/favicon.ico",
+		"/static/app.css", "/static/img/logo.svg", "/static/",
+	}
+	for _, p := range exempt {
+		if !skipsSessionLoad(p) {
+			t.Errorf("路径 %s 应跳过会话加载", p)
+		}
+	}
+
+	// 业务路径必须仍然加载会话 —— 否则登录态、权限判断全部失效。
+	notExempt := []string{
+		"/", "/products", "/users", "/admin/update",
+		"/static", // 少了结尾斜杠，不是静态资源目录
+		"/healthzz", "/healthz/extra",
+	}
+	for _, p := range notExempt {
+		if skipsSessionLoad(p) {
+			t.Errorf("路径 %s 不应跳过会话加载", p)
+		}
+	}
+}
+
+// TestAuthenticateSkipsSessionLoadForProbesAndStatic 行为级验证。
+//
+// 这里刻意让 SessionManager 持有 nil store：只要中间件真的去加载会话，
+// 就会立刻 panic。用这种方式证明「确实一次都没碰数据库」，
+// 而不是只比较状态码 —— 后者在「查了库但恰好查不到」时同样是 200。
+//
+// 为什么值得这么较真：/healthz 是**存活**探针，语义是「进程还能响应吗」。
+// 让它依赖数据库，数据库一抖动编排系统就会判定进程已死并重启，
+// 把一个本可自愈的故障放大成重启风暴。
+func TestAuthenticateSkipsSessionLoadForProbesAndStatic(t *testing.T) {
+	cfg := &config.Config{RememberLifetime: time.Hour}
+	m := New(auth.NewSessionManager(nil, cfg), cfg, nil)
+
+	for _, path := range []string{"/healthz", "/readyz", "/favicon.ico", "/static/app.css"} {
+		t.Run(path, func(t *testing.T) {
+			reached := false
+			chain := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				reached = true
+				w.WriteHeader(http.StatusOK)
+			}), m.Authenticate)
+
+			req := httptest.NewRequest(http.MethodGet, path, nil)
+			// 真实浏览器访问同源静态资源时就会带上会话 cookie，
+			// 正是这个组合会触发「每个资源查一次库」。
+			req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "some-token"})
+
+			rec := httptest.NewRecorder()
+			chain.ServeHTTP(rec, req)
+
+			if !reached || rec.Code != http.StatusOK {
+				t.Errorf("路径 %s 应直接放行，实际状态码 %d", path, rec.Code)
+			}
+		})
+	}
+}
+
+// TestAuthenticateStillLoadsSessionForAppPaths 反向确认豁免范围没有开得过大。
+//
+// 判据同样是 nil store：业务路径必须真的去加载会话，
+// 因此必定 panic。若这里没 panic，说明豁免写宽了 ——
+// 那会导致登录态失效、权限判断形同虚设，是远比性能严重的问题。
+func TestAuthenticateStillLoadsSessionForAppPaths(t *testing.T) {
+	cfg := &config.Config{RememberLifetime: time.Hour}
+	m := New(auth.NewSessionManager(nil, cfg), cfg, nil)
+
+	defer func() {
+		if rec := recover(); rec == nil {
+			t.Error("业务路径必须加载会话；store 为 nil 却未 panic，说明豁免范围开得过宽")
+		}
+	}()
+
+	chain := Chain(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}), m.Authenticate)
+
+	req := httptest.NewRequest(http.MethodGet, "/products", nil)
+	req.AddCookie(&http.Cookie{Name: auth.SessionCookieName, Value: "some-token"})
+	chain.ServeHTTP(httptest.NewRecorder(), req)
 }

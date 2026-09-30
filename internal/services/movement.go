@@ -126,6 +126,14 @@ func (s *Store) ApplyMovement(ctx context.Context, typ models.MovementType, in M
 		return nil, fmt.Errorf("%w：当前库存为 %d %s，无法出库 %d %s",
 			ErrInsufficientStock, before, prodUnit, in.Quantity, prodUnit)
 	}
+	// 上限要卡在**结存**上，而不是只卡单次输入。
+	// 只校验 in.Quantity 的话，连续入库可以把库存一路累加突破上限，
+	// MaxQuantity 那句「保证 before_qty + delta 不溢出 int64」也就落了空 ——
+	// 单次不越界，累加起来照样能溢出。
+	if after > MaxQuantity {
+		return nil, fmt.Errorf("%w：入库后库存将达到 %d %s，超过单个商品的上限 %d",
+			ErrInvalidInput, after, prodUnit, MaxQuantity)
+	}
 
 	now := nowUTC()
 	if _, err := tx.ExecContext(ctx,
@@ -201,6 +209,15 @@ func (s *Store) AdjustStock(ctx context.Context, productID int64, targetQty int,
 	}
 
 	delta := targetQty - before
+	if delta == 0 {
+		// 盘点数与当前库存一致时直接返回，不落一条 delta=0 的流水。
+		// 这类条目既非盘盈也非盘亏，对「追溯库存变动」没有任何信息量，
+		// 却会因为误点「盘点」而在流水表里不断堆积噪音 ——
+		// 真正需要找记录时，反而被这些空条目淹没。
+		return nil, fmt.Errorf("%w：当前库存已经是 %d %s，无需盘点调整",
+			ErrInvalidInput, before, prodUnit)
+	}
+
 	now := nowUTC()
 
 	if _, err := tx.ExecContext(ctx,
@@ -320,14 +337,34 @@ func (s *Store) ListMovements(ctx context.Context, f MovementFilter) ([]models.S
 	return out, pg, rows.Err()
 }
 
-// ListMovementsForExport 返回符合条件的全部流水（不分页）。
-func (s *Store) ListMovementsForExport(ctx context.Context, f MovementFilter) ([]models.StockMovement, error) {
+// MaxExportRows 是单次导出允许返回的最大行数。
+//
+// 导出会把结果一次性读进内存，没有上限的话，一个跑了几年的大库
+// 可能在一次导出里把进程内存吃光。上限本身是必要的 ——
+// 但**必须让用户看得见**：早先这里写死 `LIMIT 50000` 且不做任何提示，
+// 导出的 CSV 悄悄少了数据，使用者还以为自己拿到了全量，
+// 再拿这份残缺数据去做对账，后果比直接报错严重得多。
+const MaxExportRows = 50000
+
+// ListMovementsForExport 返回符合条件的流水（不分页）。
+//
+// truncated 为真表示结果被 MaxExportRows 截断，调用方**必须**把这个事实
+// 明确告诉用户（例如写进导出文件本身），不能静默丢弃。
+func (s *Store) ListMovementsForExport(ctx context.Context, f MovementFilter) ([]models.StockMovement, bool, error) {
+	return s.listMovementsForExport(ctx, f, MaxExportRows)
+}
+
+// listMovementsForExport 是导出的实际实现，上限作为参数传入以便测试。
+func (s *Store) listMovementsForExport(ctx context.Context, f MovementFilter, limit int) ([]models.StockMovement, bool, error) {
 	whereSQL, args := f.buildWhere()
-	query := movementSelect + ` WHERE ` + whereSQL + ` ORDER BY m.created_at DESC, m.id DESC LIMIT 50000`
+	query := movementSelect + ` WHERE ` + whereSQL + ` ORDER BY m.created_at DESC, m.id DESC LIMIT ?`
+	// 多取一行用于判断是否真的被截断：只看 len(out) == limit
+	// 无法区分「恰好这么多」与「后面还有更多」。
+	args = append(args, limit+1)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("查询流水失败: %w", err)
+		return nil, false, fmt.Errorf("查询流水失败: %w", err)
 	}
 	defer rows.Close()
 
@@ -335,11 +372,17 @@ func (s *Store) ListMovementsForExport(ctx context.Context, f MovementFilter) ([
 	for rows.Next() {
 		m, err := scanMovement(rows)
 		if err != nil {
-			return nil, fmt.Errorf("解析流水记录失败: %w", err)
+			return nil, false, fmt.Errorf("解析流水记录失败: %w", err)
 		}
 		out = append(out, *m)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	if len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
 }
 
 // ListProductMovements 查询单个商品的最近流水。

@@ -46,13 +46,20 @@ func MaskEmail(email string) string {
 }
 
 // Truncate 按字符（而非字节）截断字符串，并追加省略号。
+//
+// max 小于等于 0 时返回空串：截断到「零个字符」本就该是空串，
+// 而放任负数走到 runes[:max] 会直接 panic ——
+// 一个格式化辅助函数不该把调用方的参数错误升级成整个请求崩掉。
 func Truncate(s string, max int) string {
+	if max <= 0 {
+		return ""
+	}
 	runes := []rune(s)
 	if len(runes) <= max {
 		return s
 	}
-	if max <= 1 {
-		return string(runes[:max])
+	if max == 1 {
+		return string(runes[:1])
 	}
 	return string(runes[:max-1]) + "…"
 }

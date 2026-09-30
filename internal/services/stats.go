@@ -29,8 +29,14 @@ func (s *Store) DashboardStats(ctx context.Context) (*models.DashboardStats, err
 			nil, &sqlPair{&st.TotalStock, &st.StockValue},
 		},
 		{
+			// ⚠️ 口径必须与预警列表（ProductFilter.LowStockOnly）完全一致：
+			// 都统计 quantity <= safety_stock，缺货商品也算在内。
+			// 早先这里多了一个 quantity > 0，把缺货商品排除在计数之外，
+			// 于是仪表盘徽标显示 5、点进去的列表却有 8 条 —— 用户只会认为
+			// 有一半数据没加载出来。缺货是「低库存」里更严重的一档，
+			// 单独用 OutOfStockCount 呈现，两者是包含关系而非并列关系。
 			`SELECT COUNT(*) FROM products
-			 WHERE status != 'archived' AND quantity > 0 AND quantity <= safety_stock`,
+			 WHERE status != 'archived' AND quantity <= safety_stock`,
 			nil, &st.LowStockCount,
 		},
 		{

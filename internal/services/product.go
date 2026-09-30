@@ -85,11 +85,21 @@ func (f ProductFilter) buildWhere() (string, []any) {
 		where = append(where, "p.supplier_id = ?")
 		args = append(args, f.SupplierID)
 	}
-	if f.Status != "" && f.Status != "all" {
+	// 状态筛选分三种情形，不能把后两者合并：
+	//   ""    —— 默认视图，隐含排除归档（归档意味着「不再参与日常管理」）；
+	//   "all" —— 字面意义的「全部状态」，归档商品也必须显示出来；
+	//   其他  —— 精确匹配某个状态。
+	// 早先 "" 与 "all" 共用同一个 else 分支，于是下拉里选了「全部状态」
+	// 反而筛不出归档商品 —— 一个叫「全部」却少给结果的筛选项，
+	// 比根本没有这个选项更容易误导人。
+	switch f.Status {
+	case "":
+		where = append(where, "p.status != 'archived'")
+	case "all":
+		// 不加任何状态条件
+	default:
 		where = append(where, "p.status = ?")
 		args = append(args, f.Status)
-	} else {
-		where = append(where, "p.status != 'archived'")
 	}
 	if f.LowStockOnly {
 		where = append(where, "p.quantity <= p.safety_stock")
@@ -203,6 +213,28 @@ func (s *Store) GetProductBySKU(ctx context.Context, sku string) (*models.Produc
 	return p, nil
 }
 
+// CountLowStockBreakdown 统计预警商品中「已缺货」与「低于安全库存但仍有货」各有多少。
+//
+// 口径与预警列表（ProductFilter.LowStockOnly）严格一致，
+// 因此 outOfStock + lowStock 恒等于该列表的总条数。
+//
+// 必须用独立的聚合查询，不能遍历当前页的商品来数：分页之后那样数出来的
+// 只是「本页」的构成，商品一超过一页，页面顶部两个数字就会莫名其妙变小，
+// 而用户完全看不出原因。
+func (s *Store) CountLowStockBreakdown(ctx context.Context) (outOfStock, lowStock int, err error) {
+	err = s.db.QueryRowContext(ctx, `
+		SELECT
+			COALESCE(SUM(CASE WHEN quantity <= 0 THEN 1 ELSE 0 END), 0),
+			COALESCE(SUM(CASE WHEN quantity > 0 THEN 1 ELSE 0 END), 0)
+		  FROM products
+		 WHERE status != 'archived' AND quantity <= safety_stock`).
+		Scan(&outOfStock, &lowStock)
+	if err != nil {
+		return 0, 0, fmt.Errorf("统计库存预警构成失败: %w", err)
+	}
+	return outOfStock, lowStock, nil
+}
+
 // ListLowStockProducts 返回库存低于或等于安全库存的商品，按缺口从大到小排序。
 func (s *Store) ListLowStockProducts(ctx context.Context, limit int) ([]models.Product, error) {
 	if limit <= 0 {
@@ -294,6 +326,13 @@ func (in *ProductInput) normalize() error {
 func (s *Store) CreateProduct(ctx context.Context, in ProductInput, operatorID int64) (*models.Product, error) {
 	if err := in.normalize(); err != nil {
 		return nil, err
+	}
+	// 操作人必须有效。期初库存大于 0 时 operatorID 会写进流水的外键列，
+	// 而该列是 NOT NULL REFERENCES users(id)：不在这里拦下的话，
+	// 用户看到的会是一句裸的「constraint failed」，
+	// 整笔建商品操作回滚，却不知道究竟哪里填错了。
+	if operatorID <= 0 {
+		return nil, fmt.Errorf("%w：缺少操作人信息", ErrInvalidInput)
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -393,9 +432,23 @@ func (s *Store) SetProductStatus(ctx context.Context, id int64, status string) e
 }
 
 // DeleteProduct 删除商品。存在库存流水时拒绝删除，以保留审计记录。
+//
+// 「查流水」与「删商品」必须在同一个事务里完成：拆成两条独立语句的话，
+// 两次查询之间只要有人对该商品做了一次出入库，DELETE 就会把它刚写入的
+// 流水一起带走（stock_movements.product_id 早期甚至是 ON DELETE CASCADE）。
+// 事务加上 DSN 里的 `_txlock=immediate`，保证这中间不会被插进别的写操作。
+//
+// 数据库侧的外键已收紧为 RESTRICT（见 schema.sql 与 enforceMovementForeignKeys），
+// 即便将来有人绕过这一层，也会被数据库直接拒绝。
 func (s *Store) DeleteProduct(ctx context.Context, id int64) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("开启事务失败: %w", err)
+	}
+	defer tx.Rollback()
+
 	var movements int
-	if err := s.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM stock_movements WHERE product_id = ?`, id).Scan(&movements); err != nil {
 		return fmt.Errorf("检查商品流水失败: %w", err)
 	}
@@ -403,7 +456,7 @@ func (s *Store) DeleteProduct(ctx context.Context, id int64) error {
 		return fmt.Errorf("%w：该商品已有 %d 条库存流水，请改为「归档」以保留历史记录", ErrInvalidInput, movements)
 	}
 
-	res, err := s.db.ExecContext(ctx, `DELETE FROM products WHERE id = ?`, id)
+	res, err := tx.ExecContext(ctx, `DELETE FROM products WHERE id = ?`, id)
 	if err != nil {
 		return fmt.Errorf("删除商品失败: %w", err)
 	}
@@ -413,6 +466,9 @@ func (s *Store) DeleteProduct(ctx context.Context, id int64) error {
 	}
 	if n == 0 {
 		return ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("提交事务失败: %w", err)
 	}
 	return nil
 }

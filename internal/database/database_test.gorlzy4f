@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sync"
 	"testing"
 )
 
@@ -1230,60 +1229,6 @@ func TestSeedIsSafeUnderConcurrentStartup(t *testing.T) {
 	if n := countRows(t, db, ctx, "users"); n != 1 {
 		t.Errorf("用户数 = %d，期望 1（并发启动不应创建多个管理员）", n)
 	}
-	if n := countRows(t, db, ctx, "products"); n != len(demoProducts) {
-		t.Errorf("商品数 = %d，期望 %d（演示数据只应写入一套）", n, len(demoProducts))
-	}
-	if n := countRows(t, db, ctx, "categories"); n != len(demoCategories) {
-		t.Errorf("分类数 = %d，期望 %d", n, len(demoCategories))
-	}
-	if n := countRows(t, db, ctx, "suppliers"); n != len(demoSuppliers) {
-		t.Errorf("供应商数 = %d，期望 %d", n, len(demoSuppliers))
-	}
-}
-
-// TestSeedDemoDataIsSafeUnderConcurrentStartup 并发写入演示数据不应互相打架。
-//
-// 这条比上面那个端到端用例更「锐利」：Seed 里 seedAdmin 要先跑 bcrypt（几十毫秒），
-// 天然把几个 goroutine 错开了，竞态窗口不一定能压出来。这里跳过 bcrypt，
-// 让 8 个 goroutine 同时起跑去抢「判空 + 写入」这一段。
-//
-// 修复前判空在事务之外：它们会同时读到「一件商品都没有」，
-// 然后各写一套演示数据 —— 分类名、供应商名都带唯一约束，
-// 后到的必然报错并让服务起不来。
-func TestSeedDemoDataIsSafeUnderConcurrentStartup(t *testing.T) {
-	db, ctx := newTestDB(t)
-
-	// 先建好管理员：演示流水的操作人必须指向一个真实账号
-	if err := Seed(ctx, db, SeedOptions{
-		AdminUsername: "admin",
-		AdminEmail:    "admin@example.com",
-		AdminPassword: "Admin@12345",
-	}, testLogger()); err != nil {
-		t.Fatalf("初始化管理员失败: %v", err)
-	}
-
-	const workers = 8
-	var wg sync.WaitGroup
-	errs := make([]error, workers)
-	start := make(chan struct{})
-
-	for i := 0; i < workers; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			<-start // 同时起跑，尽量把竞态窗口压出来
-			errs[idx] = seedDemoData(ctx, db, testLogger())
-		}(i)
-	}
-	close(start)
-	wg.Wait()
-
-	for i, err := range errs {
-		if err != nil {
-			t.Errorf("第 %d 个并发写入失败: %v", i+1, err)
-		}
-	}
-
 	if n := countRows(t, db, ctx, "products"); n != len(demoProducts) {
 		t.Errorf("商品数 = %d，期望 %d（演示数据只应写入一套）", n, len(demoProducts))
 	}

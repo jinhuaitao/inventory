@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -662,17 +663,64 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	h.redirectWith(w, r, "/login", "info", "您已安全退出")
 }
 
-// sanitizeNext 防止开放重定向：只允许站内相对路径。
+// sanitizeNext 防止开放重定向：只接受站内相对路径，否则返回空串。
+//
+// 判定刻意比「字符串看着像相对路径」更严。因为最终落进 Location 头的值
+// 是由**浏览器**解析的，而浏览器遵循 WHATWG URL 规范，会先静默剥离
+// ASCII 空白（Tab、LF、CR、垂直制表符等）再解析。于是：
+//
+//	"/\t/evil.com"    → 剥离 Tab 后变成 "//evil.com"
+//	"/%09/evil.com"   → 解码后同样是 Tab，同样是 "//evil.com"
+//
+// 两者在字符串层面都以单个斜杠开头、也不含裸换行，光靠 HasPrefix 与
+// Contains("\n") 拦不住，但浏览器会把它们当成**协议相对 URL**，
+// 一次登录跳转就把用户送到站外（正好是钓鱼最喜欢的落点）。
+//
+// 因此这里做三件事：先看前缀，再用 url.Parse 复核没有 Scheme / Host，
+// 最后对**解析之后**的字符串拒绝控制字符 —— 顺序不能颠倒，
+// 百分号编码的控制字符只有在解析后才会现形。
 func sanitizeNext(next string) string {
 	next = strings.TrimSpace(next)
 	if next == "" {
 		return ""
 	}
+	// "//host" 与 "/\host" 在浏览器里都被当成协议相对 URL。
 	if !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") || strings.HasPrefix(next, "/\\") {
 		return ""
 	}
-	if strings.Contains(next, "\n") || strings.Contains(next, "\r") {
+
+	u, err := url.Parse(next)
+	if err != nil || u.Scheme != "" || u.Host != "" || u.Opaque != "" || u.User != nil {
 		return ""
 	}
-	return next
+	if !strings.HasPrefix(u.Path, "/") {
+		return ""
+	}
+
+	// 丢弃 fragment：它不参与导航目标，留在 URL 里只会让审计更难读。
+	rebuilt := u.Path
+	if u.RawQuery != "" {
+		rebuilt += "?" + u.RawQuery
+	}
+	if containsControlChar(rebuilt) {
+		return ""
+	}
+	return rebuilt
+}
+
+// containsControlChar 报告 s 是否含 ASCII 空白或控制字符（含空格与 DEL）。
+//
+// 这些字符在写入 Location 头之前不会被 Go 过滤，却会被浏览器当作空白
+// 剥掉，从而改变 URL 的实际语义，属于开放重定向的经典绕过手法：
+// "/ /evil.com" 与 "/\t/evil.com" 剥掉空白后都成了 "//evil.com"。
+//
+// 空格之所以一并拒绝，是因为 WHATWG 的剥离规则覆盖它，
+// 而站内路径与查询串本就不该出现裸空格（该编码成 %20）。
+func containsControlChar(s string) bool {
+	for _, r := range s {
+		if r <= 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }

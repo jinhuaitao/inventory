@@ -477,3 +477,85 @@ func TestCategoryAndSupplierCRUD(t *testing.T) {
 		t.Error("分类删除后商品的分类字段应被置空")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 状态与资料更新的校验
+// ---------------------------------------------------------------------------
+
+// TestSetUserStatusRejectsUnknownStatus 锁死状态取值的白名单。
+//
+// SetUserStatus 会把参数原样写进 status 列，而登录鉴权只认 active。
+// 若不校验，一次畸形请求就能把账号改成「既不是 active 也不是 disabled」
+// 的取值：账号从此登不上，界面上的「启用」按钮也救不回来。
+func TestSetUserStatusRejectsUnknownStatus(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+
+	admin := seedUser(t, store)
+	victim, err := store.CreateUser(ctx, CreateUserInput{
+		Username: "victim", Email: "victim@example.com",
+		Password: "Secret@123", Role: models.RoleViewer,
+	})
+	if err != nil {
+		t.Fatalf("创建用户失败: %v", err)
+	}
+	_ = admin
+
+	for _, bad := range []string{"", "ACTIVE", "active ", "deleted", "禁用", "1", "null"} {
+		if err := store.SetUserStatus(ctx, victim.ID, bad); !errors.Is(err, ErrInvalidInput) {
+			t.Errorf("SetUserStatus(%q) 应返回 ErrInvalidInput，实际: %v", bad, err)
+		}
+	}
+
+	// 状态必须原样保持 —— 被拒绝的写入不能留下痕迹
+	reloaded, err := store.GetUserByID(ctx, victim.ID)
+	if err != nil {
+		t.Fatalf("查询用户失败: %v", err)
+	}
+	if reloaded.Status != models.UserStatusActive {
+		t.Errorf("被拒绝的写入不应改动状态，实际 status = %q", reloaded.Status)
+	}
+
+	// 合法取值仍然可用
+	if err := store.SetUserStatus(ctx, victim.ID, models.UserStatusDisabled); err != nil {
+		t.Errorf("禁用账号不应失败: %v", err)
+	}
+	if err := store.SetUserStatus(ctx, victim.ID, models.UserStatusActive); err != nil {
+		t.Errorf("启用账号不应失败: %v", err)
+	}
+}
+
+// TestSetUserStatusNotFound 对不存在的用户返回 ErrNotFound，而不是静默成功。
+func TestSetUserStatusNotFound(t *testing.T) {
+	store, _ := newTestStore(t)
+	err := store.SetUserStatus(context.Background(), 987654, models.UserStatusDisabled)
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("对不存在的用户设置状态应返回 ErrNotFound，实际: %v", err)
+	}
+}
+
+// TestUpdateProfileNotFound 对不存在的用户返回 ErrNotFound。
+//
+// UPDATE 影响 0 行时若返回 nil，页面会提示「资料已更新」，
+// 而实际上什么都没改 —— 这类假成功最难排查。
+func TestUpdateProfileNotFound(t *testing.T) {
+	store, _ := newTestStore(t)
+	err := store.UpdateProfile(context.Background(), 987654, "查无此人", "ghost@example.com")
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("对不存在的用户更新资料应返回 ErrNotFound，实际: %v", err)
+	}
+}
+
+// TestUpdateUserByAdminNotFound 管理员改不存在的用户返回 ErrNotFound。
+func TestUpdateUserByAdminNotFound(t *testing.T) {
+	store, _ := newTestStore(t)
+	err := store.UpdateUserByAdmin(context.Background(), 987654, AdminUpdateUserInput{
+		FullName: "查无此人",
+		Email:    "ghost@example.com",
+		Role:     models.RoleViewer,
+		Status:   models.UserStatusActive,
+	})
+	if !errors.Is(err, ErrNotFound) {
+		t.Errorf("管理员更新不存在的用户应返回 ErrNotFound，实际: %v", err)
+	}
+}

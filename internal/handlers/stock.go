@@ -312,7 +312,7 @@ func buildMovementQuery(f services.MovementFilter) string {
 func (h *Handler) MovementExport(w http.ResponseWriter, r *http.Request) {
 	f := parseMovementFilter(r)
 
-	movements, err := h.store.ListMovementsForExport(r.Context(), f)
+	movements, truncated, err := h.store.ListMovementsForExport(r.Context(), f)
 	if err != nil {
 		h.serverError(w, r, err)
 		return
@@ -322,7 +322,7 @@ func (h *Handler) MovementExport(w http.ResponseWriter, r *http.Request) {
 		"时间", "类型", "商品名称", "SKU", "变动数量", "变动前", "变动后",
 		"单价", "金额", "单据号", "供应商", "操作人", "备注",
 	}
-	rows := make([][]string, 0, len(movements))
+	rows := make([][]string, 0, len(movements)+1)
 	for _, m := range movements {
 		rows = append(rows, []string{
 			utils.FormatDateTime(m.CreatedAt),
@@ -339,6 +339,21 @@ func (h *Handler) MovementExport(w http.ResponseWriter, r *http.Request) {
 			m.OperatorName,
 			m.Note,
 		})
+	}
+
+	// 被行数上限截断时，必须把这个事实写进**文件本身**。
+	// 导出走的是直接下载，页面上没有地方提示；只记一条日志的话，
+	// 用户拿着缺了一截的 CSV 去对账，问题只会更大。
+	if truncated {
+		rows = append(rows, []string{fmt.Sprintf(
+			"注意：符合条件的流水超过 %d 条上限，本文件仅包含最近 %d 条，请收窄时间范围后重新导出",
+			services.MaxExportRows, services.MaxExportRows)})
+		h.logger.Warn("流水导出被行数上限截断",
+			"上限", services.MaxExportRows,
+			"已导出", len(movements),
+			"开始日期", f.StartDate,
+			"结束日期", f.EndDate,
+		)
 	}
 
 	if err := utils.WriteCSV(w, utils.TimestampedFilename("库存流水"), header, rows); err != nil {
@@ -366,14 +381,14 @@ func (h *Handler) LowStockList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 统计信息
-	var outOfStock, lowStock int
-	for _, p := range products {
-		if p.Quantity <= 0 {
-			outOfStock++
-		} else {
-			lowStock++
-		}
+	// 顶部两个数字必须覆盖**全部**预警商品，因此走独立的聚合查询。
+	// 早先这里是遍历当前页的 products 来数，分页后数出来的只是「本页」的构成：
+	// 预警商品一旦超过一页（默认 20 条），这两个数字就会比实际小，
+	// 而且列表还能翻页、数字却不再变，用户只会觉得统计坏了。
+	outOfStock, lowStock, err := h.store.CountLowStockBreakdown(r.Context())
+	if err != nil {
+		h.serverError(w, r, err)
+		return
 	}
 
 	h.render(w, r, http.StatusOK, "stock/low.html", "库存预警", "low-stock", map[string]any{
