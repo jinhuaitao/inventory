@@ -27,16 +27,15 @@
       {{/* 下面几段刻意写成整行：模板里的换行会被 HTML 折叠成一个空格，
            在中文标点前后留下空隙，看起来是「排版松散」而不是有意留白。 */}}
       <p class="muted">{{if .Data.Registration.Enabled}}当前已开启：任何能访问本站的人都可以在登录页点「立即注册」自行创建账号，新账号的角色默认为「{{.Data.Registration.DefaultRole}}」。{{else}}当前已关闭：登录页不再显示注册入口，直接访问或提交 <code>/register</code> 都会被拒绝，新账号只能由管理员在这里创建。{{end}}调整后立即生效，无需重启服务。</p>
-      <p class="field-hint">{{if .Data.Registration.Explicit}}当前取值由本页的设置决定，已覆盖环境变量 <code>INVENTORY_ALLOW_REGISTRATION</code>（该变量为 {{if .Data.Registration.EnvDefault}}true{{else}}false{{end}}）。{{else}}尚未在本页设置过，取值跟随环境变量 <code>INVENTORY_ALLOW_REGISTRATION</code>（{{if .Data.Registration.EnvDefault}}true{{else}}false{{end}}）。在下方做出选择后，本页的设置将优先于环境变量。{{end}}设置保存在数据库中，服务重启后依然保留。</p>
+      <p class="field-hint">该设置保存在数据库中，服务重启后依然保留。</p>
 
       <div class="form-actions">
         {{/* 提交的是**目标状态**而不是「切换」：重复提交、或另一个标签页里已经改过
-             时，结果依然可预期。action / enabled 都显式写出，服务端按严格模式解析。 */}}
+             时，结果依然可预期。按钮文字就是点下去会得到的状态。 */}}
         {{if .Data.Registration.Enabled}}
         <form method="post" action="/users/registration" class="inline-form"
               data-confirm="关闭后注册入口立即消失，/register 将直接拒绝访问。确认关闭？">
           <input type="hidden" name="_csrf" value="{{.CSRF}}">
-          <input type="hidden" name="action" value="set">
           <input type="hidden" name="enabled" value="false">
           <button type="submit" class="btn btn-secondary">关闭自助注册</button>
         </form>
@@ -44,18 +43,8 @@
         <form method="post" action="/users/registration" class="inline-form"
               data-confirm="开启后任何能访问本站的人都可以自助注册账号（默认角色：{{.Data.Registration.DefaultRole}}）。确认开启？">
           <input type="hidden" name="_csrf" value="{{.CSRF}}">
-          <input type="hidden" name="action" value="set">
           <input type="hidden" name="enabled" value="true">
           <button type="submit" class="btn btn-primary">开启自助注册</button>
-        </form>
-        {{end}}
-
-        {{if .Data.Registration.Explicit}}
-        <form method="post" action="/users/registration" class="inline-form"
-              data-confirm="将清除本页的设置，开关回到环境变量决定的值。确认恢复？">
-          <input type="hidden" name="_csrf" value="{{.CSRF}}">
-          <input type="hidden" name="action" value="reset">
-          <button type="submit" class="btn btn-ghost">恢复为环境变量默认值</button>
         </form>
         {{end}}
       </div>
