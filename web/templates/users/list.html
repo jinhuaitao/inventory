@@ -30,10 +30,13 @@
       <p class="field-hint">{{if .Data.Registration.Explicit}}当前取值由本页的设置决定，已覆盖环境变量 <code>INVENTORY_ALLOW_REGISTRATION</code>（该变量为 {{if .Data.Registration.EnvDefault}}true{{else}}false{{end}}）。{{else}}尚未在本页设置过，取值跟随环境变量 <code>INVENTORY_ALLOW_REGISTRATION</code>（{{if .Data.Registration.EnvDefault}}true{{else}}false{{end}}）。在下方做出选择后，本页的设置将优先于环境变量。{{end}}设置保存在数据库中，服务重启后依然保留。</p>
 
       <div class="form-actions">
+        {{/* 提交的是**目标状态**而不是「切换」：重复提交、或另一个标签页里已经改过
+             时，结果依然可预期。action / enabled 都显式写出，服务端按严格模式解析。 */}}
         {{if .Data.Registration.Enabled}}
         <form method="post" action="/users/registration" class="inline-form"
               data-confirm="关闭后注册入口立即消失，/register 将直接拒绝访问。确认关闭？">
           <input type="hidden" name="_csrf" value="{{.CSRF}}">
+          <input type="hidden" name="action" value="set">
           <input type="hidden" name="enabled" value="false">
           <button type="submit" class="btn btn-secondary">关闭自助注册</button>
         </form>
@@ -41,6 +44,7 @@
         <form method="post" action="/users/registration" class="inline-form"
               data-confirm="开启后任何能访问本站的人都可以自助注册账号（默认角色：{{.Data.Registration.DefaultRole}}）。确认开启？">
           <input type="hidden" name="_csrf" value="{{.CSRF}}">
+          <input type="hidden" name="action" value="set">
           <input type="hidden" name="enabled" value="true">
           <button type="submit" class="btn btn-primary">开启自助注册</button>
         </form>
