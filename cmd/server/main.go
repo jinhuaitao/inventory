@@ -216,6 +216,10 @@ func run() error {
 	defer stopCleanup()
 	go runCleanupLoop(cleanupCtx, store, logger)
 
+	// 定期回源自助注册开关，吸收本进程之外的改动（多实例部署、或直接改数据库）。
+	// 进程内自己改的会立刻回填缓存，所以这里只影响外部改动的收敛速度。
+	go h.RunRegistrationRefresh(cleanupCtx, handlers.RegistrationRefreshInterval)
+
 	// 定时检查新版本（未配置更新仓库时自动跳过）
 	updaterSvc.Start(cleanupCtx)
 

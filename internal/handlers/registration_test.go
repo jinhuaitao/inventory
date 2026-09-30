@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"inventory/internal/auth"
 	"inventory/internal/config"
@@ -25,6 +26,18 @@ import (
 //
 // envDefault 模拟环境变量 INVENTORY_ALLOW_REGISTRATION 给出的默认值。
 func newRegistrationTestHandler(t *testing.T, envDefault bool) *Handler {
+	t.Helper()
+
+	h := newBareRegistrationHandler(t, envDefault)
+	if err := h.InitRegistration(context.Background()); err != nil {
+		t.Fatalf("载入注册开关失败: %v", err)
+	}
+	return h
+}
+
+// newBareRegistrationHandler 同上，但**不**调用 InitRegistration，
+// 用于验证「缓存尚未载入」时的回落行为。
+func newBareRegistrationHandler(t *testing.T, envDefault bool) *Handler {
 	t.Helper()
 
 	db, err := database.Open(filepath.Join(t.TempDir(), "test.db"))
@@ -54,9 +67,6 @@ func newRegistrationTestHandler(t *testing.T, envDefault bool) *Handler {
 			DefaultRole:       string(models.RoleViewer),
 		},
 		logger: logger,
-	}
-	if err := h.InitRegistration(ctx); err != nil {
-		t.Fatalf("载入注册开关失败: %v", err)
 	}
 	return h
 }
@@ -293,4 +303,146 @@ func TestLoginPageHidesRegisterEntryWhenDisabled(t *testing.T) {
 	if strings.Contains(rec.Body.String(), "立即注册") {
 		t.Error("注册关闭后登录页不应再显示注册入口")
 	}
+}
+
+// ---------------------------------------------------------------------------
+// 缓存未载入 / 数据库不可用时的回落
+// ---------------------------------------------------------------------------
+
+// 直接构造 Handler 却漏调 InitRegistration（将来重构很容易出现这种情况）时，
+// 缓存是零值。若把零值当成真实取值，一个默认开放的站点会**静默**变成关闭。
+func TestRegistrationFallsBackToConfigWhenCacheNotLoaded(t *testing.T) {
+	h := newBareRegistrationHandler(t, true)
+
+	if !h.AllowRegistration() {
+		t.Error("缓存未载入时应回落到配置默认值 true，而不是结构体零值 false")
+	}
+	if enabled, explicit := h.RegistrationStatus(); !enabled || explicit {
+		t.Errorf("回落值不应被标记为「页面设置」，实际 enabled=%v explicit=%v", enabled, explicit)
+	}
+}
+
+// 数据库不可用时，渲染路径不能让页面崩掉，也不该把开关翻成关闭 ——
+// 500 页面恰恰是在数据库出问题时才要渲染的。
+func TestRegistrationFallsBackToConfigWhenDatabaseUnavailable(t *testing.T) {
+	h := newBareRegistrationHandler(t, true)
+
+	if err := h.store.DB().Close(); err != nil {
+		t.Fatalf("关闭数据库失败: %v", err)
+	}
+
+	if !h.AllowRegistration() {
+		t.Error("数据库不可用时应回落到配置默认值，而不是零值")
+	}
+
+	// 回源必须如实报错，交由后台循环记日志，而不是静默吞掉。
+	if err := h.RefreshRegistration(context.Background()); err == nil {
+		t.Error("数据库不可用时 RefreshRegistration 应返回错误")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 畸形请求
+// ---------------------------------------------------------------------------
+
+// 参数缺失 / 取值非法 / 动作未知都必须被拒绝，绝不能因为「读不到就当作 false」
+// 而把一次畸形请求变成「静默关闭注册」。
+func TestUserRegistrationToggleRejectsMalformedPayload(t *testing.T) {
+	cases := []struct {
+		name string
+		form url.Values
+	}{
+		{"缺少 enabled", url.Values{"action": {"set"}}},
+		{"enabled 取值非法", url.Values{"action": {"set"}, "enabled": {"yes"}}},
+		{"enabled 为空", url.Values{"action": {"set"}, "enabled": {""}}},
+		{"动作未知", url.Values{"action": {"delete"}, "enabled": {"true"}}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newRegistrationTestHandler(t, false) // 环境变量默认关闭
+			ctx := context.Background()
+			admin := testUser(models.RoleAdmin)
+
+			// 先正常开启，好确认后面的畸形请求确实没把它改掉
+			h.UserRegistrationToggle(httptest.NewRecorder(),
+				registrationRequest(url.Values{"enabled": {"true"}}, admin))
+			if !h.AllowRegistration() {
+				t.Fatal("前置条件失败：开启未生效")
+			}
+
+			rec := httptest.NewRecorder()
+			h.UserRegistrationToggle(rec, registrationRequest(tc.form, admin))
+
+			if rec.Code != http.StatusSeeOther {
+				t.Errorf("畸形请求应被拒绝并重定向，实际状态码 %d", rec.Code)
+			}
+			if !h.AllowRegistration() {
+				t.Error("畸形请求把开关改成了关闭 —— 安全相关的开关不该有这种失败方式")
+			}
+
+			st, err := h.store.RegistrationState(ctx, false)
+			if err != nil {
+				t.Fatalf("读取注册开关失败: %v", err)
+			}
+			if !st.Enabled || !st.Explicit {
+				t.Errorf("畸形请求不应改动数据库，实际 Enabled=%v Explicit=%v", st.Enabled, st.Explicit)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// 外部改动的收敛
+// ---------------------------------------------------------------------------
+
+// 绕过处理器直接改库（等价于「另一个实例」或手工 UPDATE settings），
+// 回源后缓存必须跟上。
+func TestRefreshRegistrationPicksUpExternalChange(t *testing.T) {
+	h := newRegistrationTestHandler(t, false)
+	ctx := context.Background()
+
+	if h.AllowRegistration() {
+		t.Fatal("前置条件失败：初始应为关闭")
+	}
+
+	if err := h.store.SetRegistrationEnabled(ctx, true); err != nil {
+		t.Fatalf("写入注册开关失败: %v", err)
+	}
+	if h.AllowRegistration() {
+		t.Error("回源之前缓存不应自行改变")
+	}
+
+	if err := h.RefreshRegistration(ctx); err != nil {
+		t.Fatalf("回源失败: %v", err)
+	}
+	if !h.AllowRegistration() {
+		t.Error("回源后应跟上外部改动")
+	}
+	if _, explicit := h.RegistrationStatus(); !explicit {
+		t.Error("回源后应识别出这是页面上的显式设置")
+	}
+}
+
+// 后台同步循环必须能在无人操作的情况下把外部改动吸收进来，
+// 否则「另一个进程改了开关，这个进程永远不生效」会成为一个无从解释的现象。
+func TestRunRegistrationRefreshSyncsPeriodically(t *testing.T) {
+	h := newRegistrationTestHandler(t, false)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.RunRegistrationRefresh(ctx, 5*time.Millisecond)
+
+	if err := h.store.SetRegistrationEnabled(context.Background(), true); err != nil {
+		t.Fatalf("写入注册开关失败: %v", err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if h.AllowRegistration() {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Error("后台同步循环未在 3 秒内跟上外部改动")
 }

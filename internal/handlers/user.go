@@ -129,7 +129,7 @@ func (h *Handler) UserCreate(w http.ResponseWriter, r *http.Request) {
 
 	h.logger.Info("管理员创建了用户", "新用户", created.Username, "角色", created.Role.Label(),
 		"操作人", h.currentUser(r).Username)
-	h.redirectWith(w, r, "/users", "success", "用户「"+created.Username+"」创建成功")
+	h.redirectWith(w, r, usersPath, "success", "用户「"+created.Username+"」创建成功")
 }
 
 // UserEdit 渲染编辑用户表单。
@@ -254,7 +254,7 @@ func (h *Handler) UserUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Info("管理员更新了用户", "目标用户", target.Username, "操作人", current.Username)
-	h.redirectWith(w, r, "/users", "success", "用户「"+target.Username+"」已更新")
+	h.redirectWith(w, r, usersPath, "success", "用户「"+target.Username+"」已更新")
 }
 
 // UserDelete 删除用户。
@@ -270,21 +270,21 @@ func (h *Handler) UserDelete(w http.ResponseWriter, r *http.Request) {
 
 	current := h.currentUser(r)
 	if id == current.ID {
-		h.redirectWith(w, r, "/users", "error", "不能删除自己的账号")
+		h.redirectWith(w, r, usersPath, "error", "不能删除自己的账号")
 		return
 	}
 
 	target, err := h.store.GetUserByID(r.Context(), id)
 	if err != nil {
-		h.redirectWith(w, r, "/users", "error", businessError(err))
+		h.redirectWith(w, r, usersPath, "error", businessError(err))
 		return
 	}
 
 	if err := h.store.DeleteUser(r.Context(), id); err != nil {
-		h.redirectWith(w, r, "/users", "error", businessError(err))
+		h.redirectWith(w, r, usersPath, "error", businessError(err))
 		return
 	}
 
 	h.logger.Info("管理员删除了用户", "目标用户", target.Username, "操作人", current.Username)
-	h.redirectWith(w, r, "/users", "success", "用户「"+target.Username+"」已删除")
+	h.redirectWith(w, r, usersPath, "success", "用户「"+target.Username+"」已删除")
 }

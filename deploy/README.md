@@ -562,6 +562,9 @@ server {
 | 恢复后发现数据没变，但多了 `inventory.db.restore-failed` | 上传的文件没通过完整性检查，原库被保留；换一份备份重试 |
 | 上传恢复表单报 403 安全校验未通过 | 页面停留过久导致令牌过期，刷新后重试；若刷新仍报错，说明 CSRF 中间件未能读取 multipart 表单（已修复，见 `internal/middleware`） |
 | 迁移后报 `attempt to write a readonly database` | 忘了 `chown inventory:inventory /var/lib/inventory/inventory.db` |
+| 登录页不显示「立即注册」入口 | 管理员在「用户管理」页关闭了自助注册。该页面的设置**优先于** `INVENTORY_ALLOW_REGISTRATION`，在那里开启，或点「恢复为环境变量默认值」把控制权交还配置 |
+| 改了 `INVENTORY_ALLOW_REGISTRATION` 但注册状态没变 | 同上：页面上已经设置过就会覆盖环境变量。启动日志里有一行「自助注册状态已就绪」，会写明当前取值来自哪一边 |
+| 从备份恢复后注册状态变了 | 开关存在数据库里，会跟着备份一起恢复。恢复完到「用户管理」页确认一次即可 |
 | 迁移后所有人都要重新登录 | 新机器的 `INVENTORY_SESSION_SECRET` 与旧机器不一致 |
 | 自动备份没跑 | systemd：`systemctl list-timers inventory-backup.timer`；Alpine：确认 `crond` 在运行 |
 | 端口被占用 | 修改 `INVENTORY_ADDR`，或排查 `ss -lntp | grep 8080` |
