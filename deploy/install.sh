@@ -250,9 +250,12 @@ if [ "$INIT" = "systemd" ]; then
 	else
 		info "生成配置 /etc/inventory/inventory.env（已写入随机会话密钥）"
 		SECRET="$(random_secret)"
+		# umask 077：文件在创建瞬间就是 0600，不存在「先 0644 再补 chmod」的泄露窗口
+		umask 077
 		sed "s|^INVENTORY_SESSION_SECRET=.*|INVENTORY_SESSION_SECRET=${SECRET}|" \
 			"$SCRIPT_DIR/inventory.env.example" > /etc/inventory/inventory.env
 		chmod 0600 /etc/inventory/inventory.env
+		umask 022
 	fi
 
 	if [ "$BACKUP_TIMER" -eq 1 ]; then
@@ -284,9 +287,12 @@ else
 	else
 		info "生成配置 /etc/conf.d/inventory（已写入随机会话密钥）"
 		SECRET="$(random_secret)"
+		# /etc/conf.d 是公共目录：先收拢 umask，密钥文件从创建起就是 0600
+		umask 077
 		sed "s|^INVENTORY_SESSION_SECRET=.*|INVENTORY_SESSION_SECRET=\"${SECRET}\"|" \
 			"$SCRIPT_DIR/openrc/inventory.confd" > /etc/conf.d/inventory
 		chmod 0600 /etc/conf.d/inventory
+		umask 022
 	fi
 
 	if [ "$BACKUP_TIMER" -eq 1 ]; then
@@ -309,8 +315,6 @@ fi
 # 收尾
 # ---------------------------------------------------------------------------
 
-PORT="$(printf '%s' "${INVENTORY_ADDR:-:8080}" | sed 's/.*://')"
-
 if [ "$INIT" = "systemd" ]; then
 	CONF_FILE="/etc/inventory/inventory.env"
 	OPS="  查看状态     systemctl status inventory
@@ -321,6 +325,16 @@ else
 	OPS="  查看状态     rc-service inventory status
   查看日志     tail -f ${LOG_DIR}/inventory.log
   重启服务     rc-service inventory restart"
+fi
+
+# 端口以实际生成的配置文件为准（脚本环境变量里的 INVENTORY_ADDR 并不可靠）
+PORT="$(sed -n 's/^INVENTORY_ADDR=:\{0,1\}\([0-9][0-9]*\).*/\1/p' "$CONF_FILE" 2>/dev/null | head -n1)"
+[ -n "$PORT" ] || PORT=8080
+
+# 检测到根目录 inventory.sh 的独立安装时提醒，避免两套服务互相争抢端口
+if [ -f /etc/systemd/system/inventory-server.service ] || [ -f /etc/init.d/inventory-server ]; then
+	warn "检测到另一套安装（服务名 inventory-server，来自仓库根目录的 inventory.sh）。"
+	warn "两套同时运行会争抢 8080 端口，请停用其一或错开端口。"
 fi
 
 cat <<EOF

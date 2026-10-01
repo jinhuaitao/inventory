@@ -14,9 +14,14 @@ import (
 func (h *Handler) profileData(r *http.Request, values, errs map[string]string) map[string]any {
 	user := h.currentUser(r)
 
+	// 附属信息取不到时不再伪装成「无设备 / 未设置安全问题」——
+	// 那会把数据库故障粉饰成正常状态，用户与运维都被误导。
+	// 出错记 Warn，页面上的空态同时附上「可能未刷新成功」提示。
 	sessions, err := h.store.ListUserSessions(r.Context(), user.ID)
 	if err != nil {
+		h.logger.Warn("加载登录设备列表失败", "错误", err)
 		sessions = nil
+		errs = mergeProfileNotice(errs, "部分信息加载失败，请刷新页面重试")
 	}
 
 	var currentID int64
@@ -27,6 +32,9 @@ func (h *Handler) profileData(r *http.Request, values, errs map[string]string) m
 	securityConfigured := false
 	if ok, err := h.store.HasSecurityQuestions(r.Context(), user.ID); err == nil {
 		securityConfigured = ok
+	} else {
+		h.logger.Warn("检查安全问题设置状态失败", "错误", err)
+		errs = mergeProfileNotice(errs, "部分信息加载失败，请刷新页面重试")
 	}
 
 	return map[string]any{
@@ -37,6 +45,18 @@ func (h *Handler) profileData(r *http.Request, values, errs map[string]string) m
 		"SessionCount":       len(sessions),
 		"SecurityConfigured": securityConfigured,
 	}
+}
+
+// mergeProfileNotice 在不覆盖既有表单错误的前提下补一条页面级提示，
+// 让「附属信息加载失败」对用户可见，而不是静默显示成空数据。
+func mergeProfileNotice(errs map[string]string, msg string) map[string]string {
+	if errs == nil {
+		errs = map[string]string{}
+	}
+	if _, ok := errs["form"]; !ok {
+		errs["form"] = msg
+	}
+	return errs
 }
 
 // ProfilePage 展示个人资料与登录设备。

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"net/http"
 	"time"
 )
@@ -62,7 +63,10 @@ func (h *Handler) UpdateApply(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := h.updater.Apply(r.Context(), status)
+	// 下载与替换必须脱离请求生命周期：服务器 WriteTimeout 是 60 秒，
+	// 而大包在慢速网络上的下载最长允许 5 分钟。用 r.Context() 的话，
+	// 请求一超时下载就半途而废，失败点还不可控。
+	result, err := h.updater.Apply(context.WithoutCancel(r.Context()), status)
 	if err != nil {
 		h.logger.Error("应用更新失败", "从", status.Current, "到", status.Latest, "错误", err)
 		h.renderUpdate(w, r, http.StatusInternalServerError, map[string]string{"form": err.Error()})

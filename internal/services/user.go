@@ -34,6 +34,24 @@ func VerifyPassword(hash, plain string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
 }
 
+// dummyPasswordHash 是对应一个已丢弃随机值的固定 bcrypt 摘要。
+var dummyPasswordHash = func() []byte {
+	hash, err := bcrypt.GenerateFromPassword([]byte("dummy-computation-only"), bcrypt.DefaultCost)
+	if err != nil {
+		panic("初始化密码校验占位摘要失败: " + err.Error())
+	}
+	return hash
+}()
+
+// BurnPasswordCheck 对固定摘要执行一次 bcrypt 校验，结果一定为 false。
+//
+// 登录时如果账号不存在就跳过 bcrypt，响应会比「密码错误」快几十毫秒，
+// 攻击者可以用计时差异枚举存在的用户名。调用本函数把两条路径的
+// 计算量拉平，让计时探测失去信号。
+func BurnPasswordCheck(plain string) bool {
+	return bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(plain)) == nil
+}
+
 // ---------------------------------------------------------------------------
 // 扫描
 // ---------------------------------------------------------------------------
@@ -150,8 +168,8 @@ type CreateUserInput struct {
 	Role     models.Role
 }
 
-// CreateUser 创建账号，用户名与邮箱均不区分大小写。
-func (s *Store) CreateUser(ctx context.Context, in CreateUserInput) (*models.User, error) {
+// normalize 修剪并校验输入，返回的指针语义由调用方使用。
+func (in *CreateUserInput) normalize() error {
 	in.Username = strings.TrimSpace(in.Username)
 	in.Email = strings.ToLower(strings.TrimSpace(in.Email))
 	in.FullName = strings.TrimSpace(in.FullName)
@@ -159,7 +177,41 @@ func (s *Store) CreateUser(ctx context.Context, in CreateUserInput) (*models.Use
 		in.Role = models.RoleViewer
 	}
 	if !in.Role.Valid() {
-		return nil, fmt.Errorf("%w：角色不合法", ErrInvalidInput)
+		return fmt.Errorf("%w：角色不合法", ErrInvalidInput)
+	}
+	return nil
+}
+
+// execer 抽象 *sql.DB 与 *sql.Tx 的公共写方法，便于同一份 SQL
+// 既能在事务内复用，也能在单语句场景下直接使用连接池。
+type execer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// insertUser 写入一条用户记录并返回新 ID。用户名与邮箱均不区分大小写。
+func insertUser(ctx context.Context, e execer, in CreateUserInput, passwordHash string) (int64, error) {
+	now := nowUTC()
+	res, err := e.ExecContext(ctx, `
+		INSERT INTO users (username, email, password_hash, full_name, role, status, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		in.Username, in.Email, passwordHash, in.FullName, string(in.Role), models.UserStatusActive, now, now)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return 0, conflictError(uniqueField(err))
+		}
+		return 0, fmt.Errorf("创建用户失败: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("获取新用户 ID 失败: %w", err)
+	}
+	return id, nil
+}
+
+// CreateUser 创建账号。
+func (s *Store) CreateUser(ctx context.Context, in CreateUserInput) (*models.User, error) {
+	if err := in.normalize(); err != nil {
+		return nil, err
 	}
 
 	hash, err := HashPassword(in.Password)
@@ -167,21 +219,64 @@ func (s *Store) CreateUser(ctx context.Context, in CreateUserInput) (*models.Use
 		return nil, err
 	}
 
-	now := nowUTC()
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO users (username, email, password_hash, full_name, role, status, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		in.Username, in.Email, hash, in.FullName, string(in.Role), models.UserStatusActive, now, now)
+	id, err := insertUser(ctx, s.db, in, hash)
 	if err != nil {
-		if isUniqueViolation(err) {
-			return nil, conflictError(uniqueField(err))
-		}
-		return nil, fmt.Errorf("创建用户失败: %w", err)
+		return nil, err
+	}
+	return s.GetUserByID(ctx, id)
+}
+
+// CreateUserWithQuestions 在一个事务内创建账号并写入安全问题。
+//
+// 早先注册流程是「CreateUser 成功后再 SetSecurityQuestions，失败则手工
+// DeleteUser 补偿」：补偿本身也可能失败，留下一个没有安全问题、又已被
+// 并发登录写入了会话的半成品账号。安全问题与账号必须同生同死。
+func (s *Store) CreateUserWithQuestions(ctx context.Context, in CreateUserInput, questions []models.AnswerInput) (*models.User, error) {
+	if err := ValidateSecurityAnswers(questions); err != nil {
+		return nil, err
+	}
+	if err := in.normalize(); err != nil {
+		return nil, err
 	}
 
-	id, err := res.LastInsertId()
+	// bcrypt 计算刻意放在事务之外：SQLite 写事务会锁住整个数据库，
+	// 不该让几十次哈希运算占着这把锁。
+	userHash, err := HashPassword(in.Password)
 	if err != nil {
-		return nil, fmt.Errorf("获取新用户 ID 失败: %w", err)
+		return nil, err
+	}
+	hashes := make([]string, 0, len(questions))
+	for _, q := range questions {
+		h, err := HashPassword(NormalizeAnswer(q.Answer))
+		if err != nil {
+			return nil, err
+		}
+		hashes = append(hashes, h)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	id, err := insertUser(ctx, tx, in, userHash)
+	if err != nil {
+		return nil, err
+	}
+
+	now := nowUTC()
+	for i, q := range questions {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO security_questions (user_id, position, question, answer_hash, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?)`,
+			id, i+1, strings.TrimSpace(q.Question), hashes[i], now, now); err != nil {
+			return nil, fmt.Errorf("写入安全问题失败: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 	return s.GetUserByID(ctx, id)
 }
@@ -223,12 +318,12 @@ type AdminUpdateUserInput struct {
 }
 
 // UpdateUserByAdmin 由管理员修改用户资料、角色与状态。
+//
+// 「最后一个管理员检查 → 改资料 → 重置密码 → 踢会话」必须整体原子：
+// 拆成多条独立语句时，检查与写入之间可以插进并发提权/降权，
+// 中途失败还会留下「资料改了、密码没改」的半态。
+// DSN 带 `_txlock=immediate`，写事务之间互斥，check-then-act 不再有害。
 func (s *Store) UpdateUserByAdmin(ctx context.Context, userID int64, in AdminUpdateUserInput) error {
-	target, err := s.GetUserByID(ctx, userID)
-	if err != nil {
-		return err
-	}
-
 	if !in.Role.Valid() {
 		return fmt.Errorf("%w：角色不合法", ErrInvalidInput)
 	}
@@ -240,13 +335,41 @@ func (s *Store) UpdateUserByAdmin(ctx context.Context, userID int64, in AdminUpd
 		return fmt.Errorf("%w：邮箱格式不正确", ErrInvalidInput)
 	}
 
-	// 防止把系统里最后一个可用管理员降级或禁用
-	losingAdmin := target.Role == models.RoleAdmin && target.Status == models.UserStatusActive &&
-		(in.Role != models.RoleAdmin || in.Status != models.UserStatusActive)
-	if losingAdmin {
-		n, err := s.CountActiveAdmins(ctx)
+	// 密码摘要先算好（bcrypt 计算放在事务外，避免长时间占住写锁）
+	var passwordHash string
+	if strings.TrimSpace(in.Password) != "" {
+		hash, err := HashPassword(in.Password)
 		if err != nil {
 			return err
+		}
+		passwordHash = hash
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var curRole, curStatus string
+	err = tx.QueryRowContext(ctx, `SELECT role, status FROM users WHERE id = ?`, userID).
+		Scan(&curRole, &curStatus)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("查询用户失败: %w", err)
+	}
+
+	// 防止把系统里最后一个可用管理员降级或禁用
+	losingAdmin := curRole == string(models.RoleAdmin) && curStatus == models.UserStatusActive &&
+		(in.Role != models.RoleAdmin || in.Status != models.UserStatusActive)
+	if losingAdmin {
+		var n int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM users WHERE role = ? AND status = ?`,
+			string(models.RoleAdmin), models.UserStatusActive).Scan(&n); err != nil {
+			return fmt.Errorf("统计管理员数量失败: %w", err)
 		}
 		if n <= 1 {
 			return ErrLastAdmin
@@ -254,7 +377,7 @@ func (s *Store) UpdateUserByAdmin(ctx context.Context, userID int64, in AdminUpd
 	}
 
 	now := nowUTC()
-	res, err := s.db.ExecContext(ctx, `
+	res, err := tx.ExecContext(ctx, `
 		UPDATE users SET full_name = ?, email = ?, role = ?, status = ?, updated_at = ?
 		WHERE id = ?`,
 		strings.TrimSpace(in.FullName), in.Email, string(in.Role), in.Status, now, userID)
@@ -264,25 +387,25 @@ func (s *Store) UpdateUserByAdmin(ctx context.Context, userID int64, in AdminUpd
 		}
 		return fmt.Errorf("更新用户失败: %w", err)
 	}
-	// GetUserByID 已确认目标存在，正常情况下必为 1 行；
-	// 仍然检查一次，是为了让「用户恰好被并发删除」暴露成 ErrNotFound，
-	// 而不是静默返回一个「改成功了」的假象。
+	// 目标存在性已在事务内确认，仍保留 0 行判定，让并发删除暴露成 ErrNotFound。
 	if n, err := rowsAffected(res); err != nil {
 		return err
 	} else if n == 0 {
 		return ErrNotFound
 	}
 
-	if strings.TrimSpace(in.Password) != "" {
-		if err := s.SetPassword(ctx, userID, in.Password); err != nil {
-			return err
+	if passwordHash != "" {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`, passwordHash, now, userID); err != nil {
+			return fmt.Errorf("重置密码失败: %w", err)
 		}
 		// 管理员重置密码后，强制该用户重新登录
-		if _, err := s.DeleteSessionsByUser(ctx, userID, ""); err != nil {
-			return err
+		if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
+			return fmt.Errorf("清理会话失败: %w", err)
 		}
 	}
-	return nil
+
+	return tx.Commit()
 }
 
 // SetPassword 直接写入新的密码摘要（调用方负责校验强度）。
@@ -363,15 +486,32 @@ func (s *Store) SetUserStatus(ctx context.Context, userID int64, status string) 
 }
 
 // DeleteUser 删除账号（同时级联删除其会话与重置令牌）。
+//
+// 「最后一个管理员 / 是否有流水」两项检查与 DELETE 必须在同一个事务里：
+// 拆开执行时，两次检查之间只要有人用该账号做了一次出入库，
+// DELETE 就会把带审计记录的账号删掉 —— 与 DeleteProduct 是同一类竞态。
 func (s *Store) DeleteUser(ctx context.Context, userID int64) error {
-	u, err := s.GetUserByID(ctx, userID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("开启事务失败: %w", err)
 	}
-	if u.Role == models.RoleAdmin && u.Status == models.UserStatusActive {
-		n, err := s.CountActiveAdmins(ctx)
-		if err != nil {
-			return err
+	defer tx.Rollback()
+
+	var role, status string
+	err = tx.QueryRowContext(ctx, `SELECT role, status FROM users WHERE id = ?`, userID).
+		Scan(&role, &status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("查询用户失败: %w", err)
+	}
+	if role == string(models.RoleAdmin) && status == models.UserStatusActive {
+		var n int
+		if err := tx.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM users WHERE role = ? AND status = ?`,
+			string(models.RoleAdmin), models.UserStatusActive).Scan(&n); err != nil {
+			return fmt.Errorf("统计管理员数量失败: %w", err)
 		}
 		if n <= 1 {
 			return ErrLastAdmin
@@ -380,7 +520,7 @@ func (s *Store) DeleteUser(ctx context.Context, userID int64) error {
 
 	// 该用户若产生过库存流水，则保留账号以维持审计完整性
 	var movements int
-	if err := s.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM stock_movements WHERE operator_id = ?`, userID).Scan(&movements); err != nil {
 		return fmt.Errorf("检查用户流水失败: %w", err)
 	}
@@ -388,7 +528,7 @@ func (s *Store) DeleteUser(ctx context.Context, userID int64) error {
 		return fmt.Errorf("%w：该用户已有 %d 条库存操作记录，建议改为「禁用」而非删除", ErrInvalidInput, movements)
 	}
 
-	res, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, userID)
+	res, err := tx.ExecContext(ctx, `DELETE FROM users WHERE id = ?`, userID)
 	if err != nil {
 		return fmt.Errorf("删除用户失败: %w", err)
 	}
@@ -399,7 +539,7 @@ func (s *Store) DeleteUser(ctx context.Context, userID int64) error {
 	if n == 0 {
 		return ErrNotFound
 	}
-	return nil
+	return tx.Commit()
 }
 
 // ---------------------------------------------------------------------------
@@ -421,8 +561,8 @@ func (s *Store) ListUsers(ctx context.Context, f UserFilter) ([]models.User, *ut
 	args := []any{}
 
 	if f.Search != "" {
-		like := "%" + f.Search + "%"
-		where = append(where, "(username LIKE ? OR email LIKE ? OR full_name LIKE ?)")
+		like := likePattern(f.Search)
+		where = append(where, "(username LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR full_name LIKE ? ESCAPE '\\')")
 		args = append(args, like, like, like)
 	}
 	if f.Role != "" {

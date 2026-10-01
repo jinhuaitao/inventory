@@ -36,6 +36,7 @@ func (h *Handler) CategoryList(w http.ResponseWriter, r *http.Request) {
 		"Categories": categories,
 		"Pagination": pg,
 		"Search":     f.Search,
+		"Query":      currentQueryWithoutPage(r),
 	})
 }
 

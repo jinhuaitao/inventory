@@ -129,6 +129,9 @@ func (r *Renderer) Render(w http.ResponseWriter, status int, page string, data a
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// 页面内容与会话绑定（用户名、权限、业务数据），禁止浏览器与中间
+	// 代理缓存，避免后退/重放把上一位用户的数据留在共享缓存里。
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	if _, err := buf.WriteTo(w); err != nil && r.logger != nil {
 		r.logger.Error("写出响应失败", "页面", page, "错误", err)

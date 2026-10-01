@@ -73,8 +73,8 @@ func (f ProductFilter) buildWhere() (string, []any) {
 	args := []any{}
 
 	if f.Search != "" {
-		like := "%" + f.Search + "%"
-		where = append(where, "(p.name LIKE ? OR p.sku LIKE ? OR p.barcode LIKE ? OR p.location LIKE ?)")
+		like := likePattern(f.Search)
+		where = append(where, "(p.name LIKE ? ESCAPE '\\' OR p.sku LIKE ? ESCAPE '\\' OR p.barcode LIKE ? ESCAPE '\\' OR p.location LIKE ? ESCAPE '\\')")
 		args = append(args, like, like, like, like)
 	}
 	if f.CategoryID > 0 {
@@ -165,14 +165,25 @@ func (s *Store) ListProducts(ctx context.Context, f ProductFilter) ([]models.Pro
 	return out, pg, rows.Err()
 }
 
-// ListProductsForExport 返回符合条件的全部商品（不分页），用于 CSV 导出。
-func (s *Store) ListProductsForExport(ctx context.Context, f ProductFilter) ([]models.Product, error) {
+// ListProductsForExport 返回符合条件的商品（不分页），用于 CSV 导出。
+//
+// truncated 为真表示结果被 MaxExportRows 截断，调用方**必须**把这个事实
+// 明确告诉用户（写进导出文件本身），不能像以前那样静默只出前 200 条。
+func (s *Store) ListProductsForExport(ctx context.Context, f ProductFilter) ([]models.Product, bool, error) {
+	return s.listProductsForExport(ctx, f, MaxExportRows)
+}
+
+// listProductsForExport 是导出的实际实现，上限作为参数传入以便测试。
+func (s *Store) listProductsForExport(ctx context.Context, f ProductFilter, limit int) ([]models.Product, bool, error) {
 	whereSQL, args := f.buildWhere()
-	query := productSelect + ` WHERE ` + whereSQL + ` ORDER BY ` + buildProductSort(f.SortBy, f.SortDir)
+	query := productSelect + ` WHERE ` + whereSQL + ` ORDER BY ` + buildProductSort(f.SortBy, f.SortDir) + ` LIMIT ?`
+	// 多取一行用于判断是否真的被截断：只看 len(out) == limit
+	// 无法区分「恰好这么多」与「后面还有更多」。
+	args = append(args, limit+1)
 
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("查询商品失败: %w", err)
+		return nil, false, fmt.Errorf("查询商品失败: %w", err)
 	}
 	defer rows.Close()
 
@@ -180,11 +191,17 @@ func (s *Store) ListProductsForExport(ctx context.Context, f ProductFilter) ([]m
 	for rows.Next() {
 		p, err := scanProduct(rows)
 		if err != nil {
-			return nil, fmt.Errorf("解析商品记录失败: %w", err)
+			return nil, false, fmt.Errorf("解析商品记录失败: %w", err)
 		}
 		out = append(out, *p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	if len(out) > limit {
+		return out[:limit], true, nil
+	}
+	return out, false, nil
 }
 
 // GetProduct 按 ID 查询商品。

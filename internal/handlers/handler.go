@@ -125,6 +125,15 @@ func (h *Handler) redirectBack(w http.ResponseWriter, r *http.Request, fallback,
 	h.redirectWith(w, r, target, flashType, message)
 }
 
+// currentQueryWithoutPage 把当前请求的查询参数（去掉 page）还原成查询串，
+// 供分页链接复用。列表页如果给模板传空串，用户搜索后翻到第 2 页时
+// 筛选条件会全部丢失，看起来就像「搜索没生效」。
+func currentQueryWithoutPage(r *http.Request) string {
+	q := r.URL.Query()
+	q.Del("page")
+	return q.Encode()
+}
+
 // ---------------------------------------------------------------------------
 // 错误处理
 // ---------------------------------------------------------------------------
@@ -147,9 +156,8 @@ func (h *Handler) notFound(w http.ResponseWriter, r *http.Request) {
 // forbidden 渲染 403 提示。
 func (h *Handler) forbidden(w http.ResponseWriter, r *http.Request, msg string) {
 	if utils.WantsJSON(r) {
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusForbidden)
-		_, _ = w.Write([]byte(`{"error":"` + msg + `"}`))
+		// 复用 writeJSON：手拼字符串遇到 msg 里的引号会产出非法 JSON。
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": msg})
 		return
 	}
 	utils.SetError(w, msg)
@@ -242,6 +250,9 @@ func formInt(r *http.Request, key string, fallback int) int {
 }
 
 // formFloat 读取浮点字段，解析失败返回默认值。
+//
+// ⚠️ 落库前请先用 formNumError 把关：静默回退 0 只适合「取默认值」的
+// 场景，业务数值字段直接采用会让 "12,000" 这样的输入悄悄变成 0 元。
 func formFloat(r *http.Request, key string, fallback float64) float64 {
 	raw := strings.TrimSpace(r.FormValue(key))
 	if raw == "" {
@@ -252,6 +263,28 @@ func formFloat(r *http.Request, key string, fallback float64) float64 {
 		return fallback
 	}
 	return f
+}
+
+// formNumError 校验数字表单字段：空值视为「未填」放行（由服务层取默认/0），
+// 非法输入（如 "12,000"、"abc"）返回字段错误文案，绝不能静默归零落库。
+func formNumError(r *http.Request, key, label string, integer bool) string {
+	raw := strings.TrimSpace(r.FormValue(key))
+	if raw == "" {
+		return ""
+	}
+	var err error
+	if integer {
+		_, err = strconv.Atoi(raw)
+	} else {
+		_, err = strconv.ParseFloat(raw, 64)
+	}
+	if err != nil {
+		if integer {
+			return label + "必须是整数"
+		}
+		return label + "不是有效的数字"
+	}
+	return ""
 }
 
 // formBool 读取复选框状态。

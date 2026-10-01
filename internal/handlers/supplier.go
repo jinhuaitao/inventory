@@ -36,6 +36,7 @@ func (h *Handler) SupplierList(w http.ResponseWriter, r *http.Request) {
 		"Suppliers":  suppliers,
 		"Pagination": pg,
 		"Search":     f.Search,
+		"Query":      currentQueryWithoutPage(r),
 	})
 }
 

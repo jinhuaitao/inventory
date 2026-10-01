@@ -396,5 +396,6 @@ func (h *Handler) LowStockList(w http.ResponseWriter, r *http.Request) {
 		"Pagination": pg,
 		"OutOfStock": outOfStock,
 		"LowStock":   lowStock,
+		"Query":      currentQueryWithoutPage(r),
 	})
 }

@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"strings"
 	"time"
 
 	"inventory/internal/utils"
@@ -34,6 +35,14 @@ func New(db *sql.DB, logger *slog.Logger) *Store {
 
 // DB 暴露底层连接，供健康检查等场景使用。
 func (s *Store) DB() *sql.DB { return s.db }
+
+// likePattern 把用户搜索关键词包装成 %kw%，并转义 LIKE 的通配符（\ % _）。
+// 必须配合 SQL 中的 ESCAPE '\' 使用：否则搜 "100%" 会错误命中所有以
+// "100" 开头的记录，搜 "a_b" 会把 _ 当单字符通配 —— 结果看着像 bug。
+func likePattern(kw string) string {
+	escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(kw)
+	return "%" + escaped + "%"
+}
 
 // Cleanup 清理过期会话、陈旧的登录记录与找回密码记录。
 // 由后台定时任务周期调用。

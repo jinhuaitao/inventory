@@ -197,3 +197,90 @@ func TestLoadRejectsMalformedTrustedProxies(t *testing.T) {
 		})
 	}
 }
+
+// ---------------------------------------------------------------------------
+// 安全参数范围校验：配错 = 全站锁死，必须拒绝启动
+// ---------------------------------------------------------------------------
+
+// TestLoadRejectsLockoutDisablingValues 逐个验证会让登录体系瘫痪的取值。
+//
+// MaxLoginAttempts=0 会让 loginLocked 的 n >= 0 恒真 —— 任何人都登不进来；
+// 负数的窗口 / 会话时长造成永久锁定或登录后立即过期。
+// 这类值不能「当作没配」静默回落，也不能照常启动。
+func TestLoadRejectsLockoutDisablingValues(t *testing.T) {
+	cases := []struct{ key, value string }{
+		{"INVENTORY_MAX_LOGIN_ATTEMPTS", "0"},
+		{"INVENTORY_MAX_LOGIN_ATTEMPTS", "-1"},
+		{"INVENTORY_LOCKOUT_WINDOW", "0s"},
+		{"INVENTORY_LOCKOUT_WINDOW", "-15m"},
+		{"INVENTORY_SESSION_LIFETIME", "0s"},
+		{"INVENTORY_SESSION_LIFETIME", "-1h"},
+		{"INVENTORY_UPDATE_INTERVAL", "0s"},
+	}
+	for _, c := range cases {
+		t.Run(c.key+"="+c.value, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv(c.key, c.value)
+
+			if _, err := Load(); err == nil {
+				t.Errorf("%s=%s 应当让启动失败", c.key, c.value)
+			}
+		})
+	}
+}
+
+// TestLoadRejectsRememberShorterThanSession 「记住我」短于普通会话是逻辑矛盾。
+func TestLoadRejectsRememberShorterThanSession(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("INVENTORY_SESSION_LIFETIME", "24h")
+	t.Setenv("INVENTORY_REMEMBER_LIFETIME", "1h")
+
+	if _, err := Load(); err == nil {
+		t.Error("REMEMBER_LIFETIME 短于 SESSION_LIFETIME 应当让启动失败")
+	}
+}
+
+// TestLoadFailsOnExplicitInvalidNumber 显式配置但无法解析的值必须报错。
+//
+// 静默回落默认值是最危险的假象：运维以为把备份保留数改成了 30，
+// 实际跑的仍是 14。安全参数（次数阈值）上这类偏差尤其致命。
+func TestLoadFailsOnExplicitInvalidNumber(t *testing.T) {
+	cases := []struct{ key, value string }{
+		{"INVENTORY_MAX_LOGIN_ATTEMPTS", "abc"},
+		{"INVENTORY_BACKUP_KEEP", "many"},
+		{"INVENTORY_ALLOW_REGISTRATION", "maybe"},
+		{"INVENTORY_SESSION_LIFETIME", "half"},
+	}
+	for _, c := range cases {
+		t.Run(c.key+"="+c.value, func(t *testing.T) {
+			clearConfigEnv(t)
+			t.Setenv(c.key, c.value)
+
+			if _, err := Load(); err == nil {
+				t.Errorf("%s=%q 应当报错而不是静默回落默认值", c.key, c.value)
+			}
+		})
+	}
+}
+
+// TestLoadRejectsMalformedAddr 监听地址非法时无法绑定，启动前就该失败。
+func TestLoadRejectsMalformedAddr(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("INVENTORY_ADDR", "not-a-listen-address")
+
+	if _, err := Load(); err == nil {
+		t.Error("非法 INVENTORY_ADDR 应当让启动失败")
+	}
+}
+
+// TestLoadStorageOnlyToleratesInvalidValues 离线维护命令保持宽松：
+// 备份策略里的笔误不该挡住 --purge-demo-data / --backup-db。
+func TestLoadStorageOnlyToleratesInvalidValues(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("INVENTORY_BACKUP_KEEP", "abc")
+
+	c := LoadStorageOnly()
+	if c.BackupKeep != defaultBackupKeep {
+		t.Errorf("非法保留份数应回落默认值 %d，实际 %d", defaultBackupKeep, c.BackupKeep)
+	}
+}

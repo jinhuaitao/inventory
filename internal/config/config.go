@@ -98,12 +98,24 @@ func LoadStorageOnly() *Config {
 		Env:      env("INVENTORY_ENV", "development"),
 		LogLevel: env("INVENTORY_LOG_LEVEL", "info"),
 
-		BackupDir:  env("INVENTORY_BACKUP_DIR", ""),
-		BackupKeep: envInt("INVENTORY_BACKUP_KEEP", defaultBackupKeep),
+		BackupDir: env("INVENTORY_BACKUP_DIR", ""),
+		// 离线维护命令刻意宽松：非法的保留份数按默认值处理，
+		// 不让「备份清理策略」的笔误挡住备份 / 清数据本身。
+		BackupKeep: envIntFallback("INVENTORY_BACKUP_KEEP", defaultBackupKeep),
 	}
 	c.DBPath = env("INVENTORY_DB_PATH", filepath.Join(c.DataDir, "inventory.db"))
 	c.BackupDir = resolveBackupDir(c.BackupDir, c.DataDir)
 	return c
+}
+
+// envIntFallback 读取整数环境变量，非法取值静默回落默认值。
+// 只用于离线维护命令；正式启动路径用 envInt（非法值报错）。
+func envIntFallback(key string, fallback int) int {
+	n, err := envInt(key, fallback)
+	if err != nil {
+		return fallback
+	}
+	return n
 }
 
 // defaultBackupKeep 是备份目录默认保留的份数。
@@ -130,7 +142,44 @@ func (c *Config) UpdateConfigured() bool {
 }
 
 // Load 从环境变量读取配置并返回，同时做必要的默认值填充与合法性校验。
+//
+// 对**显式设置但无法解析**的取值（如 INVENTORY_MAX_LOGIN_ATTEMPTS=abc）
+// 直接报错而不是静默回落默认值：静默回落会让运维以为配置生效了，
+// 实际跑的却是另一套值，这类偏差在安全参数（锁定阈值、会话时长）上尤其致命。
 func Load() (*Config, error) {
+	sessionLifetime, err := envDuration("INVENTORY_SESSION_LIFETIME", 12*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	rememberLifetime, err := envDuration("INVENTORY_REMEMBER_LIFETIME", 30*24*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	updateEnabled, err := envBool("INVENTORY_UPDATE_ENABLED", true)
+	if err != nil {
+		return nil, err
+	}
+	updateInterval, err := envDuration("INVENTORY_UPDATE_INTERVAL", 6*time.Hour)
+	if err != nil {
+		return nil, err
+	}
+	maxLoginAttempts, err := envInt("INVENTORY_MAX_LOGIN_ATTEMPTS", 5)
+	if err != nil {
+		return nil, err
+	}
+	lockoutWindow, err := envDuration("INVENTORY_LOCKOUT_WINDOW", 15*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	allowRegistration, err := envBool("INVENTORY_ALLOW_REGISTRATION", true)
+	if err != nil {
+		return nil, err
+	}
+	backupKeep, err := envInt("INVENTORY_BACKUP_KEEP", defaultBackupKeep)
+	if err != nil {
+		return nil, err
+	}
+
 	c := &Config{
 		AppName:  env("INVENTORY_APP_NAME", "库存管理系统"),
 		Env:      env("INVENTORY_ENV", "development"),
@@ -140,29 +189,29 @@ func Load() (*Config, error) {
 		LogLevel: env("INVENTORY_LOG_LEVEL", "info"),
 
 		SessionSecret:    env("INVENTORY_SESSION_SECRET", ""),
-		SessionLifetime:  envDuration("INVENTORY_SESSION_LIFETIME", 12*time.Hour),
-		RememberLifetime: envDuration("INVENTORY_REMEMBER_LIFETIME", 30*24*time.Hour),
+		SessionLifetime:  sessionLifetime,
+		RememberLifetime: rememberLifetime,
 
-		UpdateEnabled:  envBool("INVENTORY_UPDATE_ENABLED", true),
+		UpdateEnabled:  updateEnabled,
 		UpdateRepo:     strings.TrimSpace(env("INVENTORY_UPDATE_REPO", DefaultUpdateRepo)),
-		UpdateInterval: envDuration("INVENTORY_UPDATE_INTERVAL", 6*time.Hour),
+		UpdateInterval: updateInterval,
 		UpdateToken:    env("INVENTORY_UPDATE_TOKEN", ""),
 
 		SeedAdminUsername: env("INVENTORY_ADMIN_USERNAME", "admin"),
 		SeedAdminEmail:    env("INVENTORY_ADMIN_EMAIL", "admin@example.com"),
 		SeedAdminPassword: env("INVENTORY_ADMIN_PASSWORD", ""),
 
-		MaxLoginAttempts: envInt("INVENTORY_MAX_LOGIN_ATTEMPTS", 5),
-		LockoutWindow:    envDuration("INVENTORY_LOCKOUT_WINDOW", 15*time.Minute),
+		MaxLoginAttempts: maxLoginAttempts,
+		LockoutWindow:    lockoutWindow,
 
-		AllowRegistration: envBool("INVENTORY_ALLOW_REGISTRATION", true),
+		AllowRegistration: allowRegistration,
 		// 先 trim 再小写：环境变量里带空格是常见笔误，
 		// 若不处理会落到 default 分支报「取值不合法」，
 		// 掩盖掉「你配了 admin」这个真正重要的问题。
 		DefaultRole: strings.ToLower(strings.TrimSpace(env("INVENTORY_DEFAULT_ROLE", "viewer"))),
 
 		BackupDir:  env("INVENTORY_BACKUP_DIR", ""),
-		BackupKeep: envInt("INVENTORY_BACKUP_KEEP", defaultBackupKeep),
+		BackupKeep: backupKeep,
 	}
 
 	switch c.DefaultRole {
@@ -175,6 +224,29 @@ func Load() (*Config, error) {
 				"请改为 viewer / manager，或关闭自助注册（INVENTORY_ALLOW_REGISTRATION=false）")
 	default:
 		return nil, fmt.Errorf("INVENTORY_DEFAULT_ROLE 取值不合法：%q（可选 viewer / manager）", c.DefaultRole)
+	}
+
+	// 范围校验：这几个值一旦配错，后果不是「功能降级」而是「全站锁死」——
+	// MaxLoginAttempts=0 会让 loginLocked 的 n >= 0 恒真，任何人都登不进来；
+	// 负数的 LockoutWindow / 会话时长会造成永久锁定或登录后立即过期。
+	if c.MaxLoginAttempts < 1 {
+		return nil, fmt.Errorf("INVENTORY_MAX_LOGIN_ATTEMPTS 至少为 1（当前 %d；0 或负数会锁死全部登录）", c.MaxLoginAttempts)
+	}
+	if c.LockoutWindow <= 0 {
+		return nil, fmt.Errorf("INVENTORY_LOCKOUT_WINDOW 必须为正时长（当前 %s）", c.LockoutWindow)
+	}
+	if c.SessionLifetime <= 0 {
+		return nil, fmt.Errorf("INVENTORY_SESSION_LIFETIME 必须为正时长（当前 %s）", c.SessionLifetime)
+	}
+	if c.RememberLifetime < c.SessionLifetime {
+		return nil, fmt.Errorf("INVENTORY_REMEMBER_LIFETIME（%s）不应短于 INVENTORY_SESSION_LIFETIME（%s）",
+			c.RememberLifetime, c.SessionLifetime)
+	}
+	if c.UpdateInterval <= 0 {
+		return nil, fmt.Errorf("INVENTORY_UPDATE_INTERVAL 必须为正时长（当前 %s）", c.UpdateInterval)
+	}
+	if _, _, err := net.SplitHostPort(c.Addr); err != nil {
+		return nil, fmt.Errorf("INVENTORY_ADDR 不是合法的监听地址（%q）：%w", c.Addr, err)
 	}
 
 	proxies, err := utils.ParseTrustedProxies(env("INVENTORY_TRUSTED_PROXIES", defaultTrustedProxies))
@@ -191,7 +263,11 @@ func Load() (*Config, error) {
 	}
 
 	// 演示数据默认跟随环境：生产环境不写入，开发/测试环境写入便于试用。
-	c.SeedDemoData = envBool("INVENTORY_SEED_DEMO_DATA", !c.IsProduction())
+	seedDemo, err := envBool("INVENTORY_SEED_DEMO_DATA", !c.IsProduction())
+	if err != nil {
+		return nil, err
+	}
+	c.SeedDemoData = seedDemo
 
 	// 会话密钥：生产环境必须显式提供，开发环境自动生成一个临时密钥。
 	if c.SessionSecret == "" {
@@ -251,29 +327,41 @@ func env(key, fallback string) string {
 	return fallback
 }
 
-func envInt(key string, fallback int) int {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		if n, err := strconv.Atoi(v); err == nil {
-			return n
-		}
+// envInt 读取整数环境变量；显式设置了非法值时返回错误（不静默回落）。
+func envInt(key string, fallback int) (int, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
 	}
-	return fallback
+	n, err := strconv.Atoi(strings.TrimSpace(v))
+	if err != nil {
+		return 0, fmt.Errorf("%s 需要整数，当前取值 %q", key, v)
+	}
+	return n, nil
 }
 
-func envBool(key string, fallback bool) bool {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		if b, err := strconv.ParseBool(v); err == nil {
-			return b
-		}
+// envBool 读取布尔环境变量；显式设置了非法值时返回错误。
+func envBool(key string, fallback bool) (bool, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
 	}
-	return fallback
+	b, err := strconv.ParseBool(strings.TrimSpace(v))
+	if err != nil {
+		return false, fmt.Errorf("%s 需要 true/false/1/0，当前取值 %q", key, v)
+	}
+	return b, nil
 }
 
-func envDuration(key string, fallback time.Duration) time.Duration {
-	if v, ok := os.LookupEnv(key); ok && v != "" {
-		if d, err := time.ParseDuration(v); err == nil {
-			return d
-		}
+// envDuration 读取时长环境变量（如 12h、15m）；显式设置了非法值时返回错误。
+func envDuration(key string, fallback time.Duration) (time.Duration, error) {
+	v, ok := os.LookupEnv(key)
+	if !ok || v == "" {
+		return fallback, nil
 	}
-	return fallback
+	d, err := time.ParseDuration(strings.TrimSpace(v))
+	if err != nil {
+		return 0, fmt.Errorf("%s 需要时长（如 90m、24h），当前取值 %q", key, v)
+	}
+	return d, nil
 }

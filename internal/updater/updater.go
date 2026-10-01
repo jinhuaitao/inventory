@@ -147,6 +147,9 @@ type Service struct {
 
 	mu     sync.RWMutex
 	status *Status
+
+	// applyMu 保证同一时刻只有一次更新在执行（TryLock 拒绝并发请求）。
+	applyMu sync.Mutex
 }
 
 // New 创建更新服务。logger 可以为 nil。

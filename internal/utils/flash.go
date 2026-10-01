@@ -63,5 +63,18 @@ func GetFlash(w http.ResponseWriter, r *http.Request) *Flash {
 	if len(parts) != 2 {
 		return nil
 	}
-	return &Flash{Type: parts[0], Message: parts[1]}
+	return &Flash{Type: sanitizeFlashType(parts[0]), Message: parts[1]}
+}
+
+// sanitizeFlashType 把 flash 类型收敛到白名单。
+//
+// 模板会把 Type 拼进 class="flash flash-{{.Type}}"，cookie 内容不可信，
+// 未知取值一律降级为 info，避免外部往里注入任意 class 词。
+func sanitizeFlashType(typ string) string {
+	switch typ {
+	case "success", "error", "warning", "info":
+		return typ
+	default:
+		return "info"
+	}
 }

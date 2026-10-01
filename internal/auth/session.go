@@ -1,4 +1,4 @@
-// Package auth 负责会话管理、CSRF 防护与邮件发送。
+// Package auth 负责会话管理与 CSRF 防护。
 package auth
 
 import (

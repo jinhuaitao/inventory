@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"inventory/internal/models"
@@ -156,6 +157,16 @@ func (s *Store) ListUserSessions(ctx context.Context, userID int64) ([]models.Se
 // 找回密码尝试（用于限制安全问题答题的暴力破解）
 // ---------------------------------------------------------------------------
 
+// normalizeAttemptIdentifier 归一化限流用的账号标识。
+//
+// users.username 列是 COLLATE NOCASE，`Admin` / `admin` / `ADMIN` 命中的是
+// 同一个账号；若限流按原始字符串计数，攻击者轮换大小写变体就能把
+// 「标识 + IP」阈值放大成倍，登录限流形同虚设。
+// 因此所有写入与统计前都必须做同样的归一。
+func normalizeAttemptIdentifier(identifier string) string {
+	return strings.ToLower(strings.TrimSpace(identifier))
+}
+
 // RecordRecoveryAttempt 记录一次找回密码尝试。
 // identifier 允许为空，userID 为 0 表示账号不存在——这两种情况也要留痕，
 // 以便对「猜账号」行为做频率限制。
@@ -166,7 +177,7 @@ func (s *Store) RecordRecoveryAttempt(ctx context.Context, userID int64, identif
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO recovery_attempts (user_id, identifier, ip, success, created_at)
-		VALUES (?, ?, ?, ?, ?)`, userID, identifier, ip, ok, nowUTC())
+		VALUES (?, ?, ?, ?, ?)`, userID, normalizeAttemptIdentifier(identifier), ip, ok, nowUTC())
 	if err != nil {
 		return fmt.Errorf("记录找回密码尝试失败: %w", err)
 	}
@@ -179,7 +190,7 @@ func (s *Store) RecordRecoveryAttempt(ctx context.Context, userID int64, identif
 func (s *Store) RecordBlockedRecoveryAttempt(ctx context.Context, userID int64, identifier, ip string) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO recovery_attempts (user_id, identifier, ip, success, blocked, created_at)
-		VALUES (?, ?, ?, 0, 1, ?)`, userID, identifier, ip, nowUTC())
+		VALUES (?, ?, ?, 0, 1, ?)`, userID, normalizeAttemptIdentifier(identifier), ip, nowUTC())
 	if err != nil {
 		return fmt.Errorf("记录被限流的找回密码尝试失败: %w", err)
 	}
@@ -202,6 +213,7 @@ func (s *Store) CountFailedRecovery(ctx context.Context, userID int64, since tim
 // CountFailedRecoveryByIdentifier 统计某标识（用户名或邮箱）在给定时间之后的失败次数。
 // 用于账号尚不存在时的频率限制。
 func (s *Store) CountFailedRecoveryByIdentifier(ctx context.Context, identifier string, since time.Time) (int, error) {
+	identifier = normalizeAttemptIdentifier(identifier)
 	if identifier == "" {
 		return 0, nil
 	}
@@ -221,6 +233,7 @@ func (s *Store) CountFailedRecoveryByIdentifier(ctx context.Context, identifier 
 // 与登录限流同理：只看标识会让人用几个请求就把别人锁在自助找回之外，
 // 因此主力维度要收敛到具体来源。
 func (s *Store) CountFailedRecoveryByIdentifierAndIP(ctx context.Context, identifier, ip string, since time.Time) (int, error) {
+	identifier = normalizeAttemptIdentifier(identifier)
 	if identifier == "" {
 		return 0, nil
 	}
@@ -280,7 +293,7 @@ func (s *Store) RecordLoginAttempt(ctx context.Context, identifier, ip string, s
 	}
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO login_attempts (identifier, ip, success, created_at)
-		VALUES (?, ?, ?, ?)`, identifier, ip, ok, nowUTC())
+		VALUES (?, ?, ?, ?)`, normalizeAttemptIdentifier(identifier), ip, ok, nowUTC())
 	if err != nil {
 		return fmt.Errorf("记录登录尝试失败: %w", err)
 	}
@@ -297,7 +310,7 @@ func (s *Store) RecordLoginAttempt(ctx context.Context, identifier, ip string, s
 func (s *Store) RecordBlockedLoginAttempt(ctx context.Context, identifier, ip string) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO login_attempts (identifier, ip, success, blocked, created_at)
-		VALUES (?, ?, 0, 1, ?)`, identifier, ip, nowUTC())
+		VALUES (?, ?, 0, 1, ?)`, normalizeAttemptIdentifier(identifier), ip, nowUTC())
 	if err != nil {
 		return fmt.Errorf("记录被限流的登录尝试失败: %w", err)
 	}
@@ -310,7 +323,7 @@ func (s *Store) CountFailedAttempts(ctx context.Context, identifier string, sinc
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM login_attempts
 		WHERE identifier = ? AND success = 0 AND blocked = 0 AND created_at >= ?`,
-		identifier, since.UTC()).Scan(&n)
+		normalizeAttemptIdentifier(identifier), since.UTC()).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("统计登录失败次数失败: %w", err)
 	}
@@ -326,7 +339,7 @@ func (s *Store) CountFailedAttemptsByIdentifierAndIP(ctx context.Context, identi
 	err := s.db.QueryRowContext(ctx, `
 		SELECT COUNT(*) FROM login_attempts
 		WHERE identifier = ? AND ip = ? AND success = 0 AND blocked = 0 AND created_at >= ?`,
-		identifier, ip, since.UTC()).Scan(&n)
+		normalizeAttemptIdentifier(identifier), ip, since.UTC()).Scan(&n)
 	if err != nil {
 		return 0, fmt.Errorf("统计登录失败次数失败: %w", err)
 	}
@@ -336,7 +349,8 @@ func (s *Store) CountFailedAttemptsByIdentifierAndIP(ctx context.Context, identi
 // ClearFailedAttempts 在成功登录后清空该标识的失败记录。
 func (s *Store) ClearFailedAttempts(ctx context.Context, identifier string) error {
 	_, err := s.db.ExecContext(ctx,
-		`DELETE FROM login_attempts WHERE identifier = ? AND success = 0`, identifier)
+		`DELETE FROM login_attempts WHERE identifier = ? AND success = 0`,
+		normalizeAttemptIdentifier(identifier))
 	return err
 }
 

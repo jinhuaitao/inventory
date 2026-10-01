@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -187,6 +188,14 @@ func (h *Handler) ProductCreate(w http.ResponseWriter, r *http.Request) {
 	values["safety_stock"] = formString(r, "safety_stock")
 
 	user := h.currentUser(r)
+
+	// 数字字段先显式校验：formFloat/formInt 对非法输入会静默回退 0，
+	// 「进价填成 12,000 → 以 0 元落库且毫无提示」正是数据错误的经典来源。
+	if numErrs := productNumberErrors(r, true); len(numErrs) > 0 {
+		h.renderProductForm(w, r, http.StatusUnprocessableEntity, false, nil, values, numErrs)
+		return
+	}
+
 	product, err := h.store.CreateProduct(r.Context(), in, user.ID)
 	if err != nil {
 		errs := map[string]string{"form": businessError(err)}
@@ -269,6 +278,12 @@ func (h *Handler) ProductUpdate(w http.ResponseWriter, r *http.Request) {
 	values["category_id"] = formString(r, "category_id")
 	values["supplier_id"] = formString(r, "supplier_id")
 
+	// 数字字段显式校验（与新建一致；编辑不改库存数量，quantity 不校验）。
+	if numErrs := productNumberErrors(r, false); len(numErrs) > 0 {
+		h.renderProductForm(w, r, http.StatusUnprocessableEntity, true, product, values, numErrs)
+		return
+	}
+
 	if err := h.store.UpdateProduct(r.Context(), id, in); err != nil {
 		errs := map[string]string{"form": businessError(err)}
 		if errors.Is(err, services.ErrInvalidInput) {
@@ -336,9 +351,8 @@ func (h *Handler) ProductDelete(w http.ResponseWriter, r *http.Request) {
 // ProductExport 导出符合条件的商品为 CSV。
 func (h *Handler) ProductExport(w http.ResponseWriter, r *http.Request) {
 	f := parseProductFilter(r)
-	f.Page, f.PerPage = 1, 200
 
-	products, err := h.store.ListProductsForExport(r.Context(), f)
+	products, truncated, err := h.store.ListProductsForExport(r.Context(), f)
 	if err != nil {
 		h.serverError(w, r, err)
 		return
@@ -368,6 +382,18 @@ func (h *Handler) ProductExport(w http.ResponseWriter, r *http.Request) {
 			status,
 			utils.FormatDateTime(p.UpdatedAt),
 		})
+	}
+
+	// 被行数上限截断时，必须把这个事实写进**文件本身**（与流水导出一致）：
+	// 导出是直接下载，页面上没有地方提示，拿着缺尾的数据去对账问题只会更大。
+	if truncated {
+		rows = append(rows, []string{fmt.Sprintf(
+			"注意：符合条件的商品超过 %d 条上限，本文件仅包含前 %d 条，请收窄筛选条件后重新导出",
+			services.MaxExportRows, services.MaxExportRows)})
+		h.logger.Warn("商品导出被行数上限截断",
+			"上限", services.MaxExportRows,
+			"已导出", len(products),
+		)
 	}
 
 	if err := utils.WriteCSV(w, utils.TimestampedFilename("商品列表"), header, rows); err != nil {
@@ -405,6 +431,24 @@ func (h *Handler) renderProductForm(w http.ResponseWriter, r *http.Request, stat
 		Suppliers:  suppliers,
 		IsEdit:     isEdit,
 	})
+}
+
+// productNumberErrors 校验商品表单的数字字段。
+// 空值视为未填（服务层取 0），非法输入必须报字段错误，不能静默归零落库。
+func productNumberErrors(r *http.Request, checkQuantity bool) map[string]string {
+	errs := map[string]string{}
+	add := func(key, label string, integer bool) {
+		if msg := formNumError(r, key, label, integer); msg != "" {
+			errs[key] = msg
+		}
+	}
+	add("cost_price", "进价", false)
+	add("sale_price", "售价", false)
+	add("safety_stock", "安全库存", true)
+	if checkQuantity {
+		add("quantity", "期初库存", true)
+	}
+	return errs
 }
 
 // productInputFromForm 从表单构造商品入参。

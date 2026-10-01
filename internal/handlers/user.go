@@ -45,6 +45,7 @@ func (h *Handler) UserList(w http.ResponseWriter, r *http.Request) {
 		"Filter":       f,
 		"Roles":        models.AllRoles(),
 		"Registration": h.registrationPageData(),
+		"Query":        currentQueryWithoutPage(r),
 	})
 }
 

@@ -277,8 +277,8 @@ func (f MovementFilter) buildWhere() (string, []any) {
 	args := []any{}
 
 	if f.Keyword != "" {
-		like := "%" + f.Keyword + "%"
-		where = append(where, "(p.name LIKE ? OR p.sku LIKE ? OR m.ref_no LIKE ? OR m.note LIKE ?)")
+		like := likePattern(f.Keyword)
+		where = append(where, "(p.name LIKE ? ESCAPE '\\' OR p.sku LIKE ? ESCAPE '\\' OR m.ref_no LIKE ? ESCAPE '\\' OR m.note LIKE ? ESCAPE '\\')")
 		args = append(args, like, like, like, like)
 	}
 	if f.Type != "" && f.Type != "all" {

@@ -64,8 +64,8 @@ func (s *Store) ListCategories(ctx context.Context, f CategoryFilter) ([]models.
 	where := []string{"1=1"}
 	args := []any{}
 	if f.Search != "" {
-		like := "%" + f.Search + "%"
-		where = append(where, "(c.name LIKE ? OR c.description LIKE ?)")
+		like := likePattern(f.Search)
+		where = append(where, "(c.name LIKE ? ESCAPE '\\' OR c.description LIKE ? ESCAPE '\\')")
 		args = append(args, like, like)
 	}
 	whereSQL := strings.Join(where, " AND ")
@@ -147,11 +147,15 @@ func (s *Store) CreateCategory(ctx context.Context, name, description string) (*
 	return s.GetCategory(ctx, id)
 }
 
-// UpdateCategory 修改分类。
+// UpdateCategory 修改分类。长度与空值规则必须与 CreateCategory 一致，
+// 否则「编辑」就是一条绕过校验的通道（超长名称正是从这里写进去的）。
 func (s *Store) UpdateCategory(ctx context.Context, id int64, name, description string) error {
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return fmt.Errorf("%w：分类名称不能为空", ErrInvalidInput)
+	}
+	if len([]rune(name)) > 50 {
+		return fmt.Errorf("%w：分类名称不能超过 50 个字符", ErrInvalidInput)
 	}
 	res, err := s.db.ExecContext(ctx, `
 		UPDATE categories SET name = ?, description = ?, updated_at = ? WHERE id = ?`,

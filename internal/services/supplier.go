@@ -66,8 +66,8 @@ func (s *Store) ListSuppliers(ctx context.Context, f SupplierFilter) ([]models.S
 	where := []string{"1=1"}
 	args := []any{}
 	if f.Search != "" {
-		like := "%" + f.Search + "%"
-		where = append(where, "(name LIKE ? OR contact_person LIKE ? OR phone LIKE ? OR email LIKE ?)")
+		like := likePattern(f.Search)
+		where = append(where, "(name LIKE ? ESCAPE '\\' OR contact_person LIKE ? ESCAPE '\\' OR phone LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\')")
 		args = append(args, like, like, like, like)
 	}
 	whereSQL := strings.Join(where, " AND ")

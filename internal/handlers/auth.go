@@ -83,8 +83,17 @@ func (h *Handler) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if user == nil || !services.VerifyPassword(user.PasswordHash, password) {
-		_ = h.store.RecordLoginAttempt(ctx, identifier, ip, false)
+	// 账号不存在时也要做一次等量 bcrypt 计算：否则「查无此人」比「密码错误」
+	// 快几十毫秒，攻击者靠计时差异就能枚举出存在的用户名。
+	passwordOK := user != nil && services.VerifyPassword(user.PasswordHash, password)
+	if user == nil {
+		services.BurnPasswordCheck(password)
+	}
+
+	if !passwordOK {
+		if err := h.store.RecordLoginAttempt(ctx, identifier, ip, false); err != nil {
+			h.logger.Warn("记录登录尝试失败", "错误", err)
+		}
 		h.renderLogin(w, r, http.StatusUnauthorized, values, map[string]string{
 			"form": "用户名或密码错误",
 		}, next)
@@ -92,15 +101,21 @@ func (h *Handler) LoginSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !user.IsActive() {
-		_ = h.store.RecordLoginAttempt(ctx, identifier, ip, false)
+		if err := h.store.RecordLoginAttempt(ctx, identifier, ip, false); err != nil {
+			h.logger.Warn("记录登录尝试失败", "错误", err)
+		}
 		h.renderLogin(w, r, http.StatusForbidden, values, map[string]string{
 			"form": "该账号已被禁用，请联系管理员",
 		}, next)
 		return
 	}
 
-	_ = h.store.RecordLoginAttempt(ctx, identifier, ip, true)
-	_ = h.store.ClearFailedAttempts(ctx, identifier)
+	if err := h.store.RecordLoginAttempt(ctx, identifier, ip, true); err != nil {
+		h.logger.Warn("记录登录尝试失败", "错误", err)
+	}
+	if err := h.store.ClearFailedAttempts(ctx, identifier); err != nil {
+		h.logger.Warn("清理登录失败记录失败", "错误", err)
+	}
 
 	if _, err := h.sessions.Create(ctx, w, r, user, remember); err != nil {
 		h.serverError(w, r, err)
@@ -329,13 +344,13 @@ func (h *Handler) RegisterSubmit(w http.ResponseWriter, r *http.Request) {
 		role = models.RoleAdmin
 	}
 
-	user, err := h.store.CreateUser(ctx, services.CreateUserInput{
+	user, err := h.store.CreateUserWithQuestions(ctx, services.CreateUserInput{
 		Username: username,
 		Email:    email,
 		Password: password,
 		FullName: fullName,
 		Role:     role,
-	})
+	}, security)
 	if err != nil {
 		errs["form"] = businessError(err)
 		if errors.Is(err, services.ErrConflict) {
@@ -347,17 +362,6 @@ func (h *Handler) RegisterSubmit(w http.ResponseWriter, r *http.Request) {
 			}
 			delete(errs, "form")
 		}
-		h.renderRegister(w, r, http.StatusUnprocessableEntity, values, errs, false, strength, strengthText)
-		return
-	}
-
-	// 写入安全问题；失败则回滚账号，保证不会留下无法找回密码的账号
-	if err := h.store.SetSecurityQuestions(ctx, user.ID, security); err != nil {
-		h.logger.Error("写入安全问题失败，已回滚账号", "用户", user.Username, "错误", err)
-		if delErr := h.store.DeleteUser(ctx, user.ID); delErr != nil {
-			h.logger.Error("回滚账号失败", "用户", user.Username, "错误", delErr)
-		}
-		errs["form"] = "安全问题保存失败，请重试"
 		h.renderRegister(w, r, http.StatusUnprocessableEntity, values, errs, false, strength, strengthText)
 		return
 	}

@@ -201,6 +201,14 @@ func run() error {
 			"密码", cfg.SeedAdminPassword,
 			"提醒", "生产环境请通过 INVENTORY_ADMIN_PASSWORD 覆盖，并登录后立即修改",
 		)
+	} else if cfg.SeedAdminPassword == "Admin@12345" {
+		// 生产环境用默认密码不会阻止启动（可能已在库里改过密码，重启时
+		// 该值本来就不再使用），但必须把风险说透：空库首次启动时，
+		// 任何人知道用户名 admin 就能直接拿到最高权限。
+		logger.Warn("生产环境仍在使用内置的默认管理员密码，请尽快处理",
+			"用户名", cfg.SeedAdminUsername,
+			"处置", "登录后立即修改密码；并通过 INVENTORY_ADMIN_PASSWORD 指定强密码后重启",
+		)
 	}
 
 	// 自助注册的生效值可能已被管理员在页面上覆盖，与当前环境变量并不一致。

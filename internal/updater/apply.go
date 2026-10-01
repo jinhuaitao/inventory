@@ -3,7 +3,6 @@ package updater
 import (
 	"archive/tar"
 	"archive/zip"
-	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/sha256"
@@ -47,7 +46,16 @@ type ApplyResult struct {
 //
 // 流程：下载安装包 → 校验 SHA-256 → 解出可执行文件 → 原子替换当前文件 → 重启进程。
 // 只有校验通过才会替换文件；替换失败会尝试回滚。
+//
+// 同一时刻只允许一次更新：两个管理员同时点「立即更新」（或双击提交）会
+// 交叉执行替换 —— 后来者可能删掉前者刚写好的 .old 备份，或对同一个
+// 暂存文件重复 rename，最坏情况把二进制弄丢。第二个请求直接被拒绝。
 func (s *Service) Apply(ctx context.Context, st *Status) (*ApplyResult, error) {
+	if !s.applyMu.TryLock() {
+		return nil, errors.New("已有更新任务正在进行，请等待其完成后重试")
+	}
+	defer s.applyMu.Unlock()
+
 	if st == nil {
 		st = s.Cached()
 	}
@@ -442,11 +450,14 @@ func writeExecutable(dest string, src io.Reader) error {
 	}
 	defer out.Close()
 
-	var buf bytes.Buffer
-	if _, err := io.Copy(io.MultiWriter(out, &buf), src); err != nil {
+	// 直接用 io.Copy 的写入字节数判空。早先把全部内容再抄一份进
+	// bytes.Buffer「只为知道是不是空的」，150 MiB 的上限意味着更新
+	// 瞬间进程内存翻倍，小内存机器上会直接 OOM。
+	written, err := io.Copy(out, src)
+	if err != nil {
 		return fmt.Errorf("写入可执行文件失败: %w", err)
 	}
-	if buf.Len() == 0 {
+	if written == 0 {
 		return errors.New("解压出的可执行文件为空")
 	}
 	if err := out.Sync(); err != nil {
