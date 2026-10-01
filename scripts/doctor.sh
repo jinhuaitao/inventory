@@ -106,6 +106,21 @@ else
 	echo "  一键修复："
 	echo "    rm -f ${OBSOLETE[*]}"
 fi
+
+# 编辑器原子保存的残留文件：形如 database_test.gorlzy4f（文件名 .go 后拖着随机后缀）。
+# 它们不以 .go 结尾，go 工具链会直接无视，却能一路混进发布目录。
+# *.go?* 会命中这类残留；已知例外 .golangci.yml 单独放行。
+artifacts="$(find cmd internal web scripts deploy -type f \
+	\( -name '*.go?*' -o -name '*~' -o -name '*.bak' -o -name '*.tmp' \) \
+	! -name '.golangci.yml' 2>/dev/null || true)"
+if [ -n "$artifacts" ]; then
+	fail=1
+	echo "  ✗ 发现编辑器/临时残留文件，应当删除："
+	echo "$artifacts" | sed 's/^/      /'
+	echo "    修复方式：逐个确认后 rm -f 删除，并把 *.gorlzy* / *~ / *.bak / *.tmp 加进 .gitignore。"
+else
+	echo "  ✓ 无编辑器残留文件"
+fi
 echo
 
 # ---------------------------------------------------------------- 3. Git 规则

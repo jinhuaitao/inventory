@@ -32,7 +32,7 @@
   </div>
 </nav>
 {{else if gt $pg.Total 0}}
-<nav class="pagination">
+<nav class="pagination" aria-label="分页导航">
   <span class="page-info">共 {{$pg.Total}} 条</span>
 </nav>
 {{end}}

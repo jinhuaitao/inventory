@@ -90,7 +90,7 @@
       {{end}}
     </div>
     {{if .Data.Pagination}}
-    <div class="card-foot">{{template "pagination" (dict "Pg" .Data.Pagination "Query" "")}}</div>
+    <div class="card-foot">{{template "pagination" (dict "Pg" .Data.Pagination "Query" .Data.Query)}}</div>
     {{end}}
   </div>
 
